@@ -82,7 +82,105 @@ fn parseInt(data: []const u8) !i64 {
 
 fn parseFloat(data: []const u8) !f64 {
     return switch (data.len) {
-        4, 8 => @floatFromInt(parseInt(data)), // read as int and convert
-        else => error.PlistMalformed, // only 4-bits (single-precsion) and 8-bits (double-precision) are supported
+        4 => {
+            const v: f32 = @bitCast(std.mem.readInt(i32, data[0..4], .big));
+            return v;
+        },
+        8 => @bitCast(std.mem.readInt(i64, data[0..8], .big)),
+        else => error.PlistMalformed, // only 4-bits (single-precision) and 8-bits (double-precision) are supported
     };
+}
+
+test "integer parsing" {
+    const types = [_]type{ i8, i16, i32, i64 };
+
+    inline for (types) |T| {
+        const min = std.math.minInt(T);
+        const max = std.math.maxInt(T);
+        const step: T = @divExact(max + 1, 2);
+
+        var i: T = min;
+        var buf: [@sizeOf(T)]u8 = undefined;
+
+        while (i <= max) {
+            std.mem.writeInt(T, &buf, i, .big);
+            try std.testing.expectEqual(i, try parseInt(&buf));
+
+            if (i == max) {
+                break;
+            }
+
+            i +|= step;
+        }
+    }
+}
+
+test "128-bit integer parsing" {
+    const min = std.math.minInt(i64);
+    const max = std.math.maxInt(i64);
+    const step = @divExact(max + 1, 2);
+
+    var i: i64 = min;
+    var buf: [16]u8 = undefined;
+
+    while (i <= max) {
+        std.mem.writeInt(i64, buf[8..16], i, .big);
+        try std.testing.expectEqual(i, try parseInt(&buf));
+
+        if (i == max) {
+            break;
+        }
+
+        i +|= step;
+    }
+}
+
+test "invalid size integer error" {
+    const data = [_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05 };
+    _ = parseInt(&data) catch |err| {
+        try std.testing.expectEqual(err, error.PlistMalformed);
+    };
+}
+
+test "unsigned integer parsing" {
+    const types = [_]type{ u8, u16, u32, u64 };
+
+    inline for (types) |T| {
+        const min = std.math.minInt(T);
+        const max = std.math.maxInt(T);
+        const step: T = @divExact(max + 1, 2);
+
+        var i: T = min;
+        var buf: [@sizeOf(T)]u8 = undefined;
+
+        while (i <= max) {
+            std.mem.writeInt(T, &buf, i, .big);
+            try std.testing.expectEqual(i, try parseUInt(&buf));
+
+            if (i == max) {
+                break;
+            }
+
+            i +|= step;
+        }
+    }
+}
+
+test "single-precision float parsing" {
+    const values = [_]f32{ 0.0, 1.0, -1.0, 3.14, -3.14, 1.0 / 3.0, -1.0 / 3.0 };
+
+    for (values) |f| {
+        var buf: [4]u8 = undefined;
+        std.mem.writeInt(i32, &buf, @bitCast(f), .big);
+        try std.testing.expectEqual(f, try parseFloat(&buf));
+    }
+}
+
+test "double-precision float parsing" {
+    const values = [_]f64{ 0.0, 1.0, -1.0, 3.14, -3.14, 1.0 / 3.0, -1.0 / 3.0 };
+    for (values) |f| {
+        var buf: [8]u8 = undefined;
+        std.mem.writeInt(i64, &buf, @bitCast(f), .big);
+        try std.testing.expectEqual(f, try parseFloat(&buf));
+    }
 }
