@@ -60,31 +60,27 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !Plist {
 }
 
 fn parseUInt(data: []const u8) !u64 {
-    std.debug.assert(data != null and data.len > 0);
-
     return switch (data.len) {
-        1, 2, 4 => try parseInt(data), // unsigned integers are the same as signed
-        8 => try parseInt(data) & 0xFFFFFFFF, // convert to unsigned
+        1 => std.mem.readInt(u8, data[0..1], .big),
+        2 => std.mem.readInt(u16, data[0..2], .big),
+        4 => std.mem.readInt(u32, data[0..4], .big),
+        8 => std.mem.readInt(u64, data[0..8], .big),
         else => error.PlistMalformed, // has to be a power of 2 <= 8
     };
 }
 
 fn parseInt(data: []const u8) !i64 {
-    std.debug.assert(data != null and data.len > 0);
-
     return switch (data.len) {
-        1 => data[0],
-        2 => std.mem.readInt(i16, data, .big),
-        4 => std.mem.readInt(i32, data, .big),
-        8 => std.mem.readInt(i64, data, .big),
-        16 => std.mem.readInt(i64, data[8..], .big), // only the lower 8 bytes are used
+        1 => std.mem.readInt(i8, data[0..1], .big),
+        2 => std.mem.readInt(i16, data[0..2], .big),
+        4 => std.mem.readInt(i32, data[0..4], .big),
+        8 => std.mem.readInt(i64, data[0..8], .big),
+        16 => parseInt(data[8..]), // only the lower 8 bytes are used
         else => error.PlistMalformed, // has to be a power of 2 <= 16
     };
 }
 
-fn parseDouble(data: []const u8) !f64 {
-    std.debug.assert(data != null and data.len > 0);
-
+fn parseFloat(data: []const u8) !f64 {
     return switch (data.len) {
         4, 8 => @floatFromInt(parseInt(data)), // read as int and convert
         else => error.PlistMalformed, // only 4-bits (single-precsion) and 8-bits (double-precision) are supported
