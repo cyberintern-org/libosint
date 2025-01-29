@@ -8,7 +8,7 @@
 //
 // This library is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
 // Lesser General Public License for more details.
 //
 // You should have received a copy of the GNU Lesser General Public
@@ -44,7 +44,11 @@ pub const Plist = struct {
 };
 
 /// Tagged union representing the different types of objects in a plist
-pub const NSObject = union(enum) {};
+pub const NSObject = union(enum) {
+    NSNumber_b: bool,
+    NSNumber_i: i64,
+    NSNumber_r: f64,
+};
 
 // PLIST PARSING
 
@@ -118,7 +122,32 @@ fn parseObject(p: *Plist, objectId: u64, refSize: u8) !?NSObject {
 
     return switch (typeByte.objType) {
         0x0 => switch (typeByte.objInfo) {
+            0x0 => null, // [0000][0000] | null object
+            0x8 => NSObject{ .NSNumber_b = false }, // [0000][1000] | NSNumber type bool = false
+            0x9 => NSObject{ .NSNumber_b = true }, // [0000][1001] | NSNumber type bool = true
+
+            0xC => null, // TODO: URL with no base URL
+            0xD => null, // TODO: URL with base URL
+            0xE => null, // TODO: 16-bit UUID
+
+            0xF => null, // [0000][1111] | fill byte
             else => error.PlistMalformed,
+        },
+        0x1 => { // [0001][0nnn] ... | NSNumber type integer of 2^nnn big-endian bytes,
+            const len = parseLen(typeByte.objInfo);
+
+            std.debug.assert(p.data.len >= offset + 1 + len);
+
+            const data = p.data[(offset + 1)..(offset + 1 + len)];
+            return NSObject{ .NSNumber_i = try parseInt(data) };
+        },
+        0x2 => { // [0010][0nnn] ... | NSNumber type real of 2^nnn big-endian bytes,
+            const len = parseLen(typeByte.objInfo);
+
+            std.debug.assert(p.data.len >= offset + 1 + len);
+
+            const data = p.data[(offset + 1)..(offset + 1 + len)];
+            return NSObject{ .NSNumber_i = try parseFloat(data) };
         },
         else => error.PlistMalformed,
     };
