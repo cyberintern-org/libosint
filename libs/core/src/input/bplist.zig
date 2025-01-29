@@ -19,6 +19,8 @@
 //! Parsing of binary property lists as specified by Apple.
 const std = @import("std");
 
+// PLIST DEFINITION
+
 /// Struct representing a parsed binary plist
 pub const Plist = struct {
     /// Arena allocator for the plist, used for all allocations
@@ -42,6 +44,8 @@ pub const Plist = struct {
 /// Tagged union representing the different types of objects in a plist
 pub const NSObject = union(enum) {};
 
+// PLIST PARSING
+
 /// Parse a binary plist from the given data
 ///
 /// For format specification see:
@@ -49,15 +53,65 @@ pub const NSObject = union(enum) {};
 pub fn parse(allocator: std.mem.Allocator, data: []const u8) !Plist {
     var plist = Plist{
         .arena = try allocator.create(std.heap.ArenaAllocator),
-        .data = data,
+        .data = try parseHeader(data),
     };
 
     errdefer allocator.destroy(plist.arena);
     plist.arena.* = std.heap.ArenaAllocator.init(allocator);
     errdefer plist.arena.deinit();
 
+    const trailer = try parseTrailer(plist.data);
+
+    plist.offsetTable = plist.arena.allocator().alloc(u64, trailer.numObjects);
+    plist.objectTable = plist.arena.allocator().alloc(?NSObject, trailer.numObjects);
+
+    for (0..trailer.numObjects) |i| {
+        const offset = trailer.offsetTableOffset + i * trailer.offsetSize;
+        plist.offsetTable[i] = try parseUInt(plist.data[offset .. offset + trailer.offsetSize]);
+    }
+
     return plist;
 }
+
+fn parseHeader(data: []const u8) ![]const u8 {
+    var offset = 0;
+
+    // Skip the BOM if present
+    if (data.len > 3 and data[0] == 0xEF and data[1] == 0xBB and data[2] == 0xBF) {
+        offset = 3;
+    }
+
+    // Skip whitespace
+    while (offset < data.len and (data[offset] == ' ' or data[offset] == '\n' or data[offset] == '\r' or data[offset] == '\t')) : (offset += 1) {}
+
+    // Check for the bplist header
+    if (data.len - offset < 8 or !std.mem.eql(u8, data[offset .. offset + 6], "bplist")) {
+        return error.PlistMalformed;
+    }
+
+    // Take only the valid bplist
+    return data[offset..];
+}
+
+fn parseTrailer(data: []const u8) !struct { offsetSize: u8, refSize: u8, numObjects: u64, topObjectId: u64, offsetTableOffset: u64 } {
+    if (data.len < 32) {
+        return error.PlistMalformed;
+    }
+
+    // Final 32 bytes of the bplist form the trailer
+    const trailer = data[(data.len - 32)..];
+
+    return .{
+        // 6 null bytes
+        .offsetSize = trailer[6],
+        .refSize = trailer[7],
+        .numObjects = try parseUInt(trailer[8..16]),
+        .topObjectId = try parseUInt(trailer[16..24]),
+        .offsetTableOffset = try parseUInt(trailer[24..32]),
+    };
+}
+
+// DATA PARSING
 
 fn parseUInt(data: []const u8) !u64 {
     return switch (data.len) {
@@ -90,6 +144,8 @@ fn parseFloat(data: []const u8) !f64 {
         else => error.PlistMalformed, // only 4-bits (single-precision) and 8-bits (double-precision) are supported
     };
 }
+
+// TEST SUITE
 
 test "integer parsing" {
     const types = [_]type{ i8, i16, i32, i64 };
