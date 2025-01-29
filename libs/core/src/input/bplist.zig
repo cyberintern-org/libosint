@@ -115,6 +115,18 @@ fn parseTrailer(data: []const u8) !struct { offsetSize: u8, refSize: u8, numObje
     };
 }
 
+fn parseObject(p: *Plist, objectId: u64) !?NSObject {
+    const offset = p.offsetTable[objectId];
+    const typeByte = parseTypeByte(p.data[offset]);
+
+    return switch (typeByte.objType) {
+        0x0 => switch (typeByte.objInfo) {
+            else => error.PlistMalformed,
+        },
+        else => error.PlistMalformed,
+    };
+}
+
 fn parseTypeByte(typeByte: u8) struct { objType: u8, objInfo: u8 } {
     const objType = (typeByte & 0xF0) >> 4; // top 4 bits, always specifies the type
     const objInfo = typeByte & 0x0F; // bottom 4 bits, specifies the type or provides additional info
