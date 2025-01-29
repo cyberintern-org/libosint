@@ -29,6 +29,9 @@ pub const Plist = struct {
     /// The raw data of the plist
     data: []const u8,
 
+    /// Size of pointer references in the data
+    refSize: u8,
+
     /// Array storing the offsets of each object in the data
     offsetTable: []const u64,
 
@@ -64,6 +67,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !Plist {
 
     plist.offsetTable = plist.arena.allocator().alloc(u64, trailer.numObjects);
     plist.objectTable = plist.arena.allocator().alloc(?NSObject, trailer.numObjects);
+    plist.refSize = trailer.refSize;
 
     for (0..trailer.numObjects) |i| {
         const offset = trailer.offsetTableOffset + i * trailer.offsetSize;
@@ -109,6 +113,39 @@ fn parseTrailer(data: []const u8) !struct { offsetSize: u8, refSize: u8, numObje
         .topObjectId = try parseUInt(trailer[16..24]),
         .offsetTableOffset = try parseUInt(trailer[24..32]),
     };
+}
+
+fn parseTypeByte(typeByte: u8) struct { objType: u8, objInfo: u8 } {
+    const objType = (typeByte & 0xF0) >> 4; // top 4 bits, always specifies the type
+    const objInfo = typeByte & 0x0F; // bottom 4 bits, specifies the type or provides additional info
+    return .{ .objType = objType, .objInfo = objInfo };
+}
+
+fn parseLen(objectInfo: u8) u64 {
+    return 1 << objectInfo; // 2^objectInfo
+}
+
+fn parseLenOffset(data: []const u8, objectInfo: u8) !struct { len: u64, offset: u64 } {
+    // 2 options:
+    // 1. [type][length] data... - length is objectInfo
+    // 2. [type][0xF] [NSNumber] data... - length is the NSNumber encoded integer
+
+    if (objectInfo != 0xF) {
+        return .{ .len = objectInfo, .offset = 1 };
+    }
+
+    std.debug.assert(data.len > 1);
+
+    // Parse NSNumber encoded integer
+    const intTypeByte = parseTypeByte(data[1]);
+    const intLength = parseLen(intTypeByte.objInfo);
+
+    // Integer NSNumber's object type is 0x1
+    if (intTypeByte.objType != 0x1) {
+        return error.PlistMalformed;
+    }
+
+    return .{ .len = try parseInt(data[2..(2 + intLength)]), .offset = 2 + intLength };
 }
 
 // DATA PARSING
