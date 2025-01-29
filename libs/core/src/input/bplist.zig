@@ -23,24 +23,23 @@ const std = @import("std");
 
 /// Struct representing a parsed binary plist
 pub const Plist = struct {
-    /// Arena allocator for the plist, used for all allocations
-    arena: *std.heap.ArenaAllocator,
+    /// Allocator used to allocate the offset and object table arrays
+    allocator: std.mem.Allocator,
 
     /// The raw data of the plist
     data: []const u8,
-
-    /// Size of pointer references in the data
-    refSize: u8,
 
     /// Array storing the offsets of each object in the data
     offsetTable: []const u64,
 
     /// Array storing the parsed objects,
     /// each object is optional, as it can be null in the original plist
-    objectTable: []const ?NSObject,
+    objectTable: std.ArrayList(?NSObject),
 
+    /// Deinitialize the plist, freeing the offset and object table arrays
     pub fn deinit(self: *Plist) void {
-        self.arena.deinit();
+        self.allocator.free(self.offsetTable);
+        self.objectTable.deinit();
     }
 };
 
@@ -55,19 +54,16 @@ pub const NSObject = union(enum) {};
 /// [opensource-apple/CF](https://github.com/opensource-apple/CF/blob/master/CFBinaryPList.c)
 pub fn parse(allocator: std.mem.Allocator, data: []const u8) !Plist {
     var plist = Plist{
-        .arena = try allocator.create(std.heap.ArenaAllocator),
+        .allocator = allocator,
         .data = try parseHeader(data),
     };
 
-    errdefer allocator.destroy(plist.arena);
-    plist.arena.* = std.heap.ArenaAllocator.init(allocator);
-    errdefer plist.arena.deinit();
-
     const trailer = try parseTrailer(plist.data);
 
-    plist.offsetTable = plist.arena.allocator().alloc(u64, trailer.numObjects);
-    plist.objectTable = plist.arena.allocator().alloc(?NSObject, trailer.numObjects);
-    plist.refSize = trailer.refSize;
+    plist.offsetTable = allocator.alloc(u64, trailer.numObjects);
+    plist.objectTable = std.ArrayList(?NSObject).initCapacity(allocator, trailer.numObjects);
+
+    errdefer plist.deinit(allocator);
 
     for (0..trailer.numObjects) |i| {
         const offset = trailer.offsetTableOffset + i * trailer.offsetSize;
@@ -115,9 +111,10 @@ fn parseTrailer(data: []const u8) !struct { offsetSize: u8, refSize: u8, numObje
     };
 }
 
-fn parseObject(p: *Plist, objectId: u64) !?NSObject {
+fn parseObject(p: *Plist, objectId: u64, refSize: u8) !?NSObject {
     const offset = p.offsetTable[objectId];
     const typeByte = parseTypeByte(p.data[offset]);
+    _ = refSize;
 
     return switch (typeByte.objType) {
         0x0 => switch (typeByte.objInfo) {
