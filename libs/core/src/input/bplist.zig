@@ -30,30 +30,30 @@ pub const Plist = struct {
     data: []const u8,
 
     /// Array storing the offsets of each object in the data
-    offsetTable: []const u64,
+    offset_table: []const u64,
 
     /// Array storing the parsed objects,
     /// each object is optional, as it can be null in the original plist
-    objectTable: std.ArrayList(?NSObject),
+    object_table: std.ArrayList(?NsObject),
 
     /// Deinitialize the plist, freeing the offset and object table arrays
     pub fn deinit(self: *Plist) void {
-        self.allocator.free(self.offsetTable);
-        self.objectTable.deinit();
+        self.allocator.free(self.offset_table);
+        self.object_table.deinit();
     }
 };
 
 /// Tagged union representing the different types of objects in a plist
-pub const NSObject = union(enum) {
-    NSNumber_b: bool,
-    NSNumber_i: i64,
-    NSNumber_r: f64,
-    NSDate: f64,
-    NSData: []const u8,
+pub const NsObject = union(enum) {
+    ns_number_b: bool,
+    ns_number_i: i64,
+    ns_number_r: f64,
+    ns_date: f64,
+    ns_data: []const u8,
 };
 
 /// UNIX timestamp of 2001-01-01 00:00:00 UTC, the Core Data epoch
-pub const EPOCH = 978307200.0;
+pub const cf_epoch = 978307200.0;
 
 // PLIST PARSING
 
@@ -69,14 +69,14 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !Plist {
 
     const trailer = try parseTrailer(plist.data);
 
-    plist.offsetTable = allocator.alloc(u64, trailer.numObjects);
-    plist.objectTable = std.ArrayList(?NSObject).initCapacity(allocator, trailer.numObjects);
+    plist.offset_table = allocator.alloc(u64, trailer.num_objects);
+    plist.object_table = std.ArrayList(?NsObject).initCapacity(allocator, trailer.num_objects);
 
     errdefer plist.deinit(allocator);
 
-    for (0..trailer.numObjects) |i| {
-        const offset = trailer.offsetTableOffset + i * trailer.offsetSize;
-        plist.offsetTable[i] = try parseUInt(plist.data[offset .. offset + trailer.offsetSize]);
+    for (0..trailer.num_objects) |i| {
+        const offset = trailer.offset_table_offset + i * trailer.offset_size;
+        plist.offset_table[i] = try parseUInt(plist.data[offset .. offset + trailer.offset_size]);
     }
 
     return plist;
@@ -102,7 +102,7 @@ fn parseHeader(data: []const u8) ![]const u8 {
     return data[offset..];
 }
 
-fn parseTrailer(data: []const u8) !struct { offsetSize: u8, refSize: u8, numObjects: u64, topObjectId: u64, offsetTableOffset: u64 } {
+fn parseTrailer(data: []const u8) !struct { offset_size: u8, ref_size: u8, num_objects: u64, top_object_id: u64, offset_table_offset: u64 } {
     if (data.len < 32) {
         return error.PlistMalformed;
     }
@@ -112,24 +112,24 @@ fn parseTrailer(data: []const u8) !struct { offsetSize: u8, refSize: u8, numObje
 
     return .{
         // 6 null bytes
-        .offsetSize = trailer[6],
-        .refSize = trailer[7],
-        .numObjects = try parseUInt(trailer[8..16]),
-        .topObjectId = try parseUInt(trailer[16..24]),
-        .offsetTableOffset = try parseUInt(trailer[24..32]),
+        .offset_size = trailer[6],
+        .ref_size = trailer[7],
+        .num_objects = try parseUInt(trailer[8..16]),
+        .top_object_id = try parseUInt(trailer[16..24]),
+        .offset_table_offset = try parseUInt(trailer[24..32]),
     };
 }
 
-fn parseObject(p: *Plist, objectId: u64, refSize: u8) !?NSObject {
-    const offset = p.offsetTable[objectId];
-    const typeByte = parseTypeByte(p.data[offset]);
-    _ = refSize;
+fn parseObject(p: *Plist, object_id: u64, ref_size: u8) !?NsObject {
+    const offset = p.offset_table[object_id];
+    const type_byte = parseTypeByte(p.data[offset]);
+    _ = ref_size;
 
-    return switch (typeByte.objType) {
-        0x0 => switch (typeByte.objInfo) {
+    return switch (type_byte.obj_type) {
+        0x0 => switch (type_byte.obj_info) {
             0x0 => null, // [0000][0000] | null object
-            0x8 => NSObject{ .NSNumber_b = false }, // [0000][1000] | NSNumber type bool = false
-            0x9 => NSObject{ .NSNumber_b = true }, // [0000][1001] | NSNumber type bool = true
+            0x8 => NsObject{ .ns_number_b = false }, // [0000][1000] | NSNumber type bool = false
+            0x9 => NsObject{ .ns_number_b = true }, // [0000][1001] | NSNumber type bool = true
 
             0xC => null, // TODO: URL with no base URL
             0xD => null, // TODO: URL with base URL
@@ -139,51 +139,51 @@ fn parseObject(p: *Plist, objectId: u64, refSize: u8) !?NSObject {
             else => error.PlistMalformed,
         },
         0x1 => { // [0001][0nnn] ... | NSNumber type integer of 2^nnn big-endian bytes,
-            const len = parseLen(typeByte.objInfo);
+            const len = parseLen(type_byte.obj_info);
 
             std.debug.assert(p.data.len >= offset + 1 + len);
 
             const data = p.data[(offset + 1)..(offset + 1 + len)];
-            return NSObject{ .NSNumber_i = try parseInt(data) };
+            return NsObject{ .ns_number_i = try parseInt(data) };
         },
         0x2 => { // [0010][0nnn] ... | NSNumber type real of 2^nnn big-endian bytes,
-            const len = parseLen(typeByte.objInfo);
+            const len = parseLen(type_byte.obj_info);
 
             std.debug.assert(p.data.len >= offset + 1 + len);
 
             const data = p.data[(offset + 1)..(offset + 1 + len)];
-            return NSObject{ .NSNumber_i = try parseFloat(data) };
+            return NsObject{ .ns_number_i = try parseFloat(data) };
         },
         0x3 => { // [0011][0011] ... | NSDate object, 8 bytes of big-endian float
-            if (typeByte.objInfo != 0x3) {
+            if (type_byte.obj_info != 0x3) {
                 return error.PlistMalformed;
             }
 
             std.debug.assert(p.data.len >= offset + 1 + 8);
 
             const data = p.data[(offset + 1)..(offset + 1 + 8)];
-            return NSObject{ .NSDate = try parseFloat(data) + EPOCH };
+            return NsObject{ .ns_date = try parseFloat(data) + cf_epoch };
         },
         0x4 => { // [0100][nnnn] ?[int] ... | NSData object, nnnn number of bytes unless nnnn == 1111, then NSNumber int follows, followed by bytes
-            const lenOffset = try parseLenOffset(p.data[offset..], typeByte.objInfo);
+            const lenOffset = try parseLenOffset(p.data[offset..], type_byte.obj_info);
 
             std.debug.assert(p.data.len >= offset + lenOffset.offset + lenOffset.len);
 
             const data = p.data[(offset + lenOffset.offset)..(offset + lenOffset.offset + lenOffset.len)];
-            return NSObject{ .NSData = data };
+            return NsObject{ .ns_data = data };
         },
         else => error.PlistMalformed,
     };
 }
 
-fn parseTypeByte(typeByte: u8) struct { objType: u8, objInfo: u8 } {
-    const objType = (typeByte & 0xF0) >> 4; // top 4 bits, always specifies the type
-    const objInfo = typeByte & 0x0F; // bottom 4 bits, specifies the type or provides additional info
-    return .{ .objType = objType, .objInfo = objInfo };
+fn parseTypeByte(type_byte: u8) struct { obj_type: u8, obj_info: u8 } {
+    const obj_type = (type_byte & 0xF0) >> 4; // top 4 bits, always specifies the type
+    const obj_info = type_byte & 0x0F; // bottom 4 bits, specifies the type or provides additional info
+    return .{ .obj_type = obj_type, .obj_info = obj_info };
 }
 
-fn parseLen(objectInfo: u8) u64 {
-    return 1 << objectInfo; // 2^objectInfo
+fn parseLen(object_info: u8) u64 {
+    return 1 << object_info; // 2^object_info
 }
 
 fn parseLenOffset(data: []const u8, objectInfo: u8) !struct { len: u64, offset: u64 } {
@@ -199,10 +199,10 @@ fn parseLenOffset(data: []const u8, objectInfo: u8) !struct { len: u64, offset: 
 
     // Parse NSNumber encoded integer
     const intTypeByte = parseTypeByte(data[1]);
-    const intLength = parseLen(intTypeByte.objInfo);
+    const intLength = parseLen(intTypeByte.obj_info);
 
     // Integer NSNumber's object type is 0x1
-    if (intTypeByte.objType != 0x1) {
+    if (intTypeByte.obj_type != 0x1) {
         return error.PlistMalformed;
     }
 
