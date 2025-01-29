@@ -49,6 +49,7 @@ pub const NSObject = union(enum) {
     NSNumber_i: i64,
     NSNumber_r: f64,
     NSDate: f64,
+    NSData: []const u8,
 };
 
 /// UNIX timestamp of 2001-01-01 00:00:00 UTC, the Core Data epoch
@@ -163,6 +164,14 @@ fn parseObject(p: *Plist, objectId: u64, refSize: u8) !?NSObject {
             const data = p.data[(offset + 1)..(offset + 1 + 8)];
             return NSObject{ .NSDate = try parseFloat(data) + EPOCH };
         },
+        0x4 => { // [0100][nnnn] ?[int] ... | NSData object, nnnn number of bytes unless nnnn == 1111, then NSNumber int follows, followed by bytes
+            const lenOffset = try parseLenOffset(p.data[offset..], typeByte.objInfo);
+
+            std.debug.assert(p.data.len >= offset + lenOffset.offset + lenOffset.len);
+
+            const data = p.data[(offset + lenOffset.offset)..(offset + lenOffset.offset + lenOffset.len)];
+            return NSObject{ .NSData = data };
+        },
         else => error.PlistMalformed,
     };
 }
@@ -196,6 +205,8 @@ fn parseLenOffset(data: []const u8, objectInfo: u8) !struct { len: u64, offset: 
     if (intTypeByte.objType != 0x1) {
         return error.PlistMalformed;
     }
+
+    std.debug.assert(data.len >= 2 + intLength);
 
     return .{ .len = try parseInt(data[2..(2 + intLength)]), .offset = 2 + intLength };
 }
