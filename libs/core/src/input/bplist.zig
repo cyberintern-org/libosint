@@ -219,27 +219,27 @@ fn parseTypeByte(type_byte: u8) struct { obj_type: u8, obj_info: u8 } {
     return .{ .obj_type = obj_type, .obj_info = obj_info };
 }
 
-fn parseLen(object_info: u8) u64 {
+inline fn parseLen(object_info: u8) u64 {
     return 1 << object_info; // 2^object_info
 }
 
-fn parseLenOffset(data: []const u8, objectInfo: u8) !struct { len: u64, offset: u64 } {
+fn parseLenOffset(data: []const u8, object_info: u8) !struct { len: u64, offset: u64 } {
     // 2 options:
     // 1. [type][length] data... - length is objectInfo
     // 2. [type][0xF] [NSNumber] data... - length is the NSNumber encoded integer
 
-    if (objectInfo != 0xF) {
-        return .{ .len = objectInfo, .offset = 1 };
+    if (object_info != 0xF) {
+        return .{ .len = object_info, .offset = 1 };
     }
 
     std.debug.assert(data.len > 1);
 
     // Parse NSNumber encoded integer
-    const intTypeByte = parseTypeByte(data[1]);
-    const intLength = parseLen(intTypeByte.obj_info);
+    const int_type_byte = parseTypeByte(data[1]);
+    const int_len = parseLen(int_type_byte.obj_info);
 
     // Integer NSNumber's object type is 0x1
-    if (intTypeByte.obj_type != 0x1) {
+    if (int_type_byte.obj_type != 0x1) {
         return error.PlistMalformed;
     }
 
