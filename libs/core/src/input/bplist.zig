@@ -48,6 +48,7 @@ pub const NsObject = union(enum) {
     ns_date: f64,
     ns_data: []const u8,
     ns_string: []const u8,
+    uid: i64,
 };
 
 /// UNIX timestamp of 2001-01-01 00:00:00 UTC, the Core Data epoch
@@ -208,6 +209,14 @@ fn parseObject(p: *Parser, object_id: u64) !?NsObject {
             try std.unicode.utf16LeToUtf8ArrayList(&p.string_bytes, data_u16);
 
             return NsObject{ .ns_string = p.string_bytes.items[idx..] };
+        },
+        0x8 => { // [1000][nnnn] ... | UID
+            const len = parseLen(type_byte.obj_info);
+
+            std.debug.assert(p.data.len >= offset + 1 + len);
+
+            const data = p.data[(offset + 1)..(offset + 1 + len)];
+            return NsObject{ .uid = try parseUInt(data) };
         },
         else => error.PlistMalformed,
     };
