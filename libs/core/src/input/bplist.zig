@@ -47,6 +47,7 @@ pub const NsObject = union(enum) {
     ns_number_r: f64,
     ns_date: f64,
     ns_data: []const u8,
+    ns_string: []const u8,
 };
 
 /// UNIX timestamp of 2001-01-01 00:00:00 UTC, the Core Data epoch
@@ -180,13 +181,33 @@ fn parseObject(p: *Parser, object_id: u64) !?NsObject {
             const data = p.data[(offset + 1)..(offset + 1 + 8)];
             return NsObject{ .ns_date = try parseFloat(data) + cf_epoch };
         },
-        0x4 => { // [0100][nnnn] ?[int] ... | NSData object, nnnn number of bytes unless nnnn == 1111, then NSNumber int follows, followed by bytes
-            const lenOffset = try parseLenOffset(p.data[offset..], type_byte.obj_info);
+        0x4 => { // [0100][nnnn] ?[int] ... | NSData object, nnnn number of bytes unless nnnn == 1111, then the length is the NSNumber int that follows
+            const data = try parseRawData(p, p.data[offset..], type_byte.obj_info);
+            const idx = p.string_bytes.len;
 
-            std.debug.assert(p.data.len >= offset + lenOffset.offset + lenOffset.len);
+            p.string_bytes.appendSliceAssumeCapacity(data);
+            return NsObject{ .ns_data = p.string_bytes.items[idx..] };
+        },
+        0x5, 0x7 => { // ([0101]/[0111])[nnnn] ?[int] ... | ASCII/UTF-8 string, nnnn number of bytes unless nnnn == 1111, then the length is the NSNumber int that follows
+            const data = try parseRawData(p, p.data[offset..], type_byte.obj_info);
+            const idx = p.string_bytes.len;
 
-            const data = p.data[(offset + lenOffset.offset)..(offset + lenOffset.offset + lenOffset.len)];
-            return NsObject{ .ns_data = data };
+            p.string_bytes.appendSliceAssumeCapacity(data);
+            return NsObject{ .ns_string = p.string_bytes.items[idx..] };
+        },
+        0x6 => { // [0110][nnnn] ?[int] ... | UTF-16Be string, nnnn number of bytes unless nnnn == 1111, then the length is the NSNumber int that follows
+            const data = try parseRawData(p, p.data[offset..], type_byte.obj_info);
+            const idx = p.string_bytes.len;
+
+            var data_u16: []const u16 = std.mem.bytesAsSlice(u16, data);
+
+            for (0..data_u16.len) |i| {
+                data_u16[i] = std.mem.bigToNative(u16, data_u16[i]);
+            }
+
+            try std.unicode.utf16LeToUtf8ArrayList(&p.string_bytes, data_u16);
+
+            return NsObject{ .ns_string = p.string_bytes.items[idx..] };
         },
         else => error.PlistMalformed,
     };
@@ -222,9 +243,17 @@ fn parseLenOffset(data: []const u8, objectInfo: u8) !struct { len: u64, offset: 
         return error.PlistMalformed;
     }
 
-    std.debug.assert(data.len >= 2 + intLength);
+    std.debug.assert(data.len >= 2 + int_len);
 
-    return .{ .len = try parseInt(data[2..(2 + intLength)]), .offset = 2 + intLength };
+    return .{ .len = try parseInt(data[2..(2 + int_len)]), .offset = 2 + int_len };
+}
+
+fn parseRawData(data: []const u8, object_info: u8) ![]const u8 {
+    const lenOffset = try parseLenOffset(data, object_info);
+
+    std.debug.assert(data.len >= lenOffset.offset + lenOffset.len);
+
+    return data[lenOffset.offset .. lenOffset.offset + lenOffset.len];
 }
 
 // DATA PARSING
