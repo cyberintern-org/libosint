@@ -26,20 +26,17 @@ pub const Plist = struct {
     /// Allocator used to allocate the offset and object table arrays
     allocator: std.mem.Allocator,
 
-    /// The raw data of the plist
-    data: []const u8,
-
-    /// Array storing the offsets of each object in the data
-    offset_table: []const u64,
-
     /// Array storing the parsed objects,
     /// each object is optional, as it can be null in the original plist
-    object_table: std.ArrayList(?NsObject),
+    objects: std.ArrayList(?NsObject),
 
-    /// Deinitialize the plist, freeing the offset and object table arrays
+    /// Copied data of the plist
+    string_bytes: std.ArrayList(u8),
+
+    /// Deinitialize the plist, freeing the objects and string bytes arrays
     pub fn deinit(self: *Plist) void {
-        self.allocator.free(self.offset_table);
-        self.object_table.deinit();
+        self.objects.deinit();
+        self.string_bytes.deinit();
     }
 };
 
@@ -57,29 +54,49 @@ pub const cf_epoch = 978307200.0;
 
 // PLIST PARSING
 
+/// Internal struct storing the intermediate state of the parsing process
+const Parser = struct {
+    allocator: std.mem.Allocator,
+
+    data: []const u8,
+    offset_table: []const u64,
+    object_table: std.ArrayList(?NsObject),
+    string_bytes: std.ArrayList(u8),
+
+    ref_size: u8,
+};
+
 /// Parse a binary plist from the given data
 ///
 /// For format specification see:
 /// [opensource-apple/CF](https://github.com/opensource-apple/CF/blob/master/CFBinaryPList.c)
 pub fn parse(allocator: std.mem.Allocator, data: []const u8) !Plist {
-    var plist = Plist{
+    var parser = Parser{
         .allocator = allocator,
         .data = try parseHeader(data),
     };
 
-    const trailer = try parseTrailer(plist.data);
+    const trailer = try parseTrailer(parser.data);
 
-    plist.offset_table = allocator.alloc(u64, trailer.num_objects);
-    plist.object_table = std.ArrayList(?NsObject).initCapacity(allocator, trailer.num_objects);
+    parser.offset_table = allocator.alloc(u64, trailer.num_objects); // length controled by the number of objects defined in the trailer
+    parser.object_table = std.ArrayList(?NsObject).initCapacity(allocator, trailer.num_objects); // same as above
+    parser.string_bytes = std.ArrayList(u8).initCapacity(allocator, parser.data.len); // at most the same size as the input data
+    parser.ref_size = trailer.ref_size;
 
-    errdefer plist.deinit(allocator);
+    defer allocator.free(parser.offset_table);
+    errdefer parser.object_table.deinit();
+    errdefer parser.string_bytes.deinit();
 
     for (0..trailer.num_objects) |i| {
         const offset = trailer.offset_table_offset + i * trailer.offset_size;
-        plist.offset_table[i] = try parseUInt(plist.data[offset .. offset + trailer.offset_size]);
+        parser.offset_table[i] = try parseUInt(parser.data[offset .. offset + trailer.offset_size]);
     }
 
-    return plist;
+    return Plist{
+        .allocator = allocator,
+        .objects = parser.object_table,
+        .string_bytes = parser.string_bytes,
+    };
 }
 
 fn parseHeader(data: []const u8) ![]const u8 {
@@ -120,10 +137,9 @@ fn parseTrailer(data: []const u8) !struct { offset_size: u8, ref_size: u8, num_o
     };
 }
 
-fn parseObject(p: *Plist, object_id: u64, ref_size: u8) !?NsObject {
+fn parseObject(p: *Parser, object_id: u64) !?NsObject {
     const offset = p.offset_table[object_id];
     const type_byte = parseTypeByte(p.data[offset]);
-    _ = ref_size;
 
     return switch (type_byte.obj_type) {
         0x0 => switch (type_byte.obj_info) {
