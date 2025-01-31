@@ -49,6 +49,7 @@ pub const NsObject = union(enum) {
     ns_data: []const u8,
     ns_string: []const u8,
     uid: i64,
+    ns_array: []?NsObject,
 };
 
 /// UNIX timestamp of 2001-01-01 00:00:00 UTC, the Core Data epoch
@@ -217,6 +218,19 @@ fn parseObject(p: *Parser, object_id: u64) !?NsObject {
 
             const data = p.data[(offset + 1)..(offset + 1 + len)];
             return NsObject{ .uid = try parseUInt(data) };
+        },
+        0xA => { // [1010][nnnn] ?[int] ... | NSArray, nnnn number of objects unless nnnn == 1111, then the length is the NSNumber int that follows
+            const lenOffset = try parseLenOffset(p.data[offset..], type_byte.obj_info);
+            const idx = p.object_table.items.len;
+
+            p.object_table.addManyAsSliceAssumeCapacity(@as(usize, lenOffset.len));
+
+            for (0..lenOffset.len) |i| {
+                const obj_id = try parseUInt(p.data[(offset + lenOffset.offset + i)..]);
+                p.object_table.items[idx + i] = try parseObject(p, obj_id);
+            }
+
+            return NsObject{ .ns_array = p.object_table.items[idx .. idx + lenOffset.len] };
         },
         else => error.PlistMalformed,
     };
