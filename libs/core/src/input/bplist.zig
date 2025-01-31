@@ -48,7 +48,7 @@ pub const NsObject = union(enum) {
     ns_date: f64,
     ns_data: []const u8,
     ns_string: []const u8,
-    uid: i64,
+    uid: u64,
     ns_array: []?NsObject,
 };
 
@@ -62,7 +62,7 @@ const Parser = struct {
     allocator: std.mem.Allocator,
 
     data: []const u8,
-    offset_table: []const u64,
+    offset_table: []u64,
     object_table: std.ArrayList(?NsObject),
     string_bytes: std.ArrayList(u8),
 
@@ -74,17 +74,17 @@ const Parser = struct {
 /// For format specification see:
 /// [opensource-apple/CF](https://github.com/opensource-apple/CF/blob/master/CFBinaryPList.c)
 pub fn parse(allocator: std.mem.Allocator, data: []const u8) !Plist {
+    const valid_data = try parseHeader(data);
+    const trailer = try parseTrailer(valid_data);
+
     var parser = Parser{
         .allocator = allocator,
-        .data = try parseHeader(data),
+        .data = valid_data,
+        .offset_table = try allocator.alloc(u64, trailer.num_objects), // length controled by the number of objects defined in the trailer
+        .object_table = try std.ArrayList(?NsObject).initCapacity(allocator, trailer.num_objects), // same as above
+        .string_bytes = try std.ArrayList(u8).initCapacity(allocator, valid_data.len), // at most the same size as the input data
+        .ref_size = trailer.ref_size,
     };
-
-    const trailer = try parseTrailer(parser.data);
-
-    parser.offset_table = allocator.alloc(u64, trailer.num_objects); // length controled by the number of objects defined in the trailer
-    parser.object_table = std.ArrayList(?NsObject).initCapacity(allocator, trailer.num_objects); // same as above
-    parser.string_bytes = std.ArrayList(u8).initCapacity(allocator, parser.data.len); // at most the same size as the input data
-    parser.ref_size = trailer.ref_size;
 
     defer allocator.free(parser.offset_table);
     errdefer parser.object_table.deinit();
@@ -95,6 +95,9 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !Plist {
         parser.offset_table[i] = try parseUInt(parser.data[offset .. offset + trailer.offset_size]);
     }
 
+    const top_object = parser.object_table.addOneAssumeCapacity();
+    top_object.* = try parseObject(&parser, trailer.top_object_id);
+
     return Plist{
         .allocator = allocator,
         .objects = parser.object_table,
@@ -103,7 +106,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !Plist {
 }
 
 fn parseHeader(data: []const u8) ![]const u8 {
-    var offset = 0;
+    var offset: u8 = 0;
 
     // Skip the BOM if present
     if (data.len > 3 and data[0] == 0xEF and data[1] == 0xBB and data[2] == 0xBF) {
@@ -171,7 +174,7 @@ fn parseObject(p: *Parser, object_id: u64) !?NsObject {
             std.debug.assert(p.data.len >= offset + 1 + len);
 
             const data = p.data[(offset + 1)..(offset + 1 + len)];
-            return NsObject{ .ns_number_i = try parseFloat(data) };
+            return NsObject{ .ns_number_r = try parseFloat(data) };
         },
         0x3 => { // [0011][0011] ... | NSDate object, 8 bytes of big-endian float
             if (type_byte.obj_info != 0x3) {
@@ -184,24 +187,24 @@ fn parseObject(p: *Parser, object_id: u64) !?NsObject {
             return NsObject{ .ns_date = try parseFloat(data) + cf_epoch };
         },
         0x4 => { // [0100][nnnn] ?[int] ... | NSData object, nnnn number of bytes unless nnnn == 1111, then the length is the NSNumber int that follows
-            const data = try parseRawData(p, p.data[offset..], type_byte.obj_info);
-            const idx = p.string_bytes.len;
+            const data = try parseRawData(p.data[offset..], type_byte.obj_info);
+            const idx = p.string_bytes.items.len;
 
             p.string_bytes.appendSliceAssumeCapacity(data);
             return NsObject{ .ns_data = p.string_bytes.items[idx..] };
         },
         0x5, 0x7 => { // ([0101]/[0111])[nnnn] ?[int] ... | ASCII/UTF-8 string, nnnn number of bytes unless nnnn == 1111, then the length is the NSNumber int that follows
-            const data = try parseRawData(p, p.data[offset..], type_byte.obj_info);
-            const idx = p.string_bytes.len;
+            const data = try parseRawData(p.data[offset..], type_byte.obj_info);
+            const idx = p.string_bytes.items.len;
 
             p.string_bytes.appendSliceAssumeCapacity(data);
             return NsObject{ .ns_string = p.string_bytes.items[idx..] };
         },
         0x6 => { // [0110][nnnn] ?[int] ... | UTF-16Be string, nnnn number of bytes unless nnnn == 1111, then the length is the NSNumber int that follows
-            const data = try parseRawData(p, p.data[offset..], type_byte.obj_info);
-            const idx = p.string_bytes.len;
+            const data = try parseRawData(p.data[offset..], type_byte.obj_info);
+            const idx = p.string_bytes.items.len;
 
-            var data_u16: []const u16 = std.mem.bytesAsSlice(u16, data);
+            var data_u16: []u16 = std.mem.bytesAsSlice(u16, @as(*[]align(2) u8, @constCast(@ptrCast(@alignCast(data)))));
 
             for (0..data_u16.len) |i| {
                 data_u16[i] = std.mem.bigToNative(u16, data_u16[i]);
@@ -223,7 +226,7 @@ fn parseObject(p: *Parser, object_id: u64) !?NsObject {
             const lenOffset = try parseLenOffset(p.data[offset..], type_byte.obj_info);
             const idx = p.object_table.items.len;
 
-            p.object_table.addManyAsSliceAssumeCapacity(@as(usize, lenOffset.len));
+            _ = p.object_table.addManyAsSliceAssumeCapacity(@as(usize, lenOffset.len));
 
             for (0..lenOffset.len) |i| {
                 const obj_id = try parseUInt(p.data[(offset + lenOffset.offset + i)..]);
@@ -243,7 +246,8 @@ fn parseTypeByte(type_byte: u8) struct { obj_type: u8, obj_info: u8 } {
 }
 
 inline fn parseLen(object_info: u8) u64 {
-    return 1 << object_info; // 2^object_info
+    const len: u64 = 1;
+    return len <<| object_info; // 2^object_info
 }
 
 fn parseLenOffset(data: []const u8, object_info: u8) !struct { len: u64, offset: u64 } {
@@ -268,7 +272,7 @@ fn parseLenOffset(data: []const u8, object_info: u8) !struct { len: u64, offset:
 
     std.debug.assert(data.len >= 2 + int_len);
 
-    return .{ .len = try parseInt(data[2..(2 + int_len)]), .offset = 2 + int_len };
+    return .{ .len = try parseUInt(data[2..(2 + int_len)]), .offset = 2 + int_len };
 }
 
 fn parseRawData(data: []const u8, object_info: u8) ![]const u8 {
