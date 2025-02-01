@@ -35,6 +35,7 @@ pub const Plist = struct {
 
     /// Deinitialize the plist, freeing the objects and string bytes arrays
     pub fn deinit(self: *Plist) void {
+        Parser.deinitObjectTable(&self.objects);
         self.objects.deinit();
         self.string_bytes.deinit();
     }
@@ -67,6 +68,24 @@ const Parser = struct {
     string_bytes: std.ArrayList(u8),
 
     ref_size: u8,
+
+    pub fn deinit(self: *Parser) void {
+        deinitObjectTable(&self.object_table);
+        self.object_table.deinit();
+        self.string_bytes.deinit();
+    }
+
+    pub fn deinitObjectTable(table: *std.ArrayList(?NsObject)) void {
+        for (table.items) |obj| {
+            if (obj == null) {
+                continue;
+            }
+
+            switch (obj.?) {
+                else => {},
+            }
+        }
+    }
 };
 
 /// Parse a binary plist from the given data
@@ -87,8 +106,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !Plist {
     };
 
     defer allocator.free(parser.offset_table);
-    errdefer parser.object_table.deinit();
-    errdefer parser.string_bytes.deinit();
+    errdefer parser.deinit();
 
     for (0..trailer.num_objects) |i| {
         const offset = trailer.offset_table_offset + i * trailer.offset_size;
