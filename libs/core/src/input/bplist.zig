@@ -19,7 +19,7 @@
 //! Parsing of binary property lists as specified by Apple.
 const std = @import("std");
 
-// PLIST DEFINITION
+// PUB DEFINITIONS
 
 /// Struct representing a parsed binary plist
 pub const Plist = struct {
@@ -28,15 +28,18 @@ pub const Plist = struct {
 
     /// Array storing the parsed objects,
     /// each object is optional, as it can be null in the original plist
-    objects: std.ArrayList(?NsObject),
+    objects: []?NsObject,
 
     /// Copied data of the plist
     string_bytes: std.ArrayList(u8),
 
+    /// Pointer to the root object of the plist
+    top: *?NsObject,
+
     /// Deinitialize the plist, freeing the objects and string bytes arrays
     pub fn deinit(self: *Plist) void {
-        Parser.deinitObjectTable(&self.objects);
-        self.objects.deinit();
+        Parser.deinitObjectTable(self.allocator, self.objects);
+        self.allocator.free(self.objects);
         self.string_bytes.deinit();
     }
 };
@@ -50,13 +53,14 @@ pub const NsObject = union(enum) {
     ns_data: []const u8,
     ns_string: []const u8,
     uid: u64,
-    ns_array: []?NsObject,
+    ns_array: []*?NsObject,
+    ns_dict: std.StringHashMap(*?NsObject),
 };
 
 /// UNIX timestamp of 2001-01-01 00:00:00 UTC, the Core Data epoch
 pub const cf_epoch = 978307200.0;
 
-// PLIST PARSING
+// PARSING
 
 /// Internal struct storing the intermediate state of the parsing process
 const Parser = struct {
@@ -64,24 +68,30 @@ const Parser = struct {
 
     data: []const u8,
     offset_table: []u64,
-    object_table: std.ArrayList(?NsObject),
+    object_table: []?NsObject,
     string_bytes: std.ArrayList(u8),
 
     ref_size: u8,
 
     pub fn deinit(self: *Parser) void {
-        deinitObjectTable(&self.object_table);
-        self.object_table.deinit();
+        deinitObjectTable(self.allocator, self.object_table);
+        self.allocator.free(self.offset_table);
         self.string_bytes.deinit();
     }
 
-    pub fn deinitObjectTable(table: *std.ArrayList(?NsObject)) void {
-        for (table.items) |obj| {
+    pub fn deinitObjectTable(allocator: std.mem.Allocator, table: []?NsObject) void {
+        for (table) |obj| {
             if (obj == null) {
                 continue;
             }
 
             switch (obj.?) {
+                .ns_dict => |dict| {
+                    @constCast(&dict).deinit();
+                },
+                .ns_array => |arr| {
+                    allocator.free(arr);
+                },
                 else => {},
             }
         }
@@ -100,7 +110,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !Plist {
         .allocator = allocator,
         .data = valid_data,
         .offset_table = try allocator.alloc(u64, trailer.num_objects), // length controled by the number of objects defined in the trailer
-        .object_table = try std.ArrayList(?NsObject).initCapacity(allocator, trailer.num_objects), // same as above
+        .object_table = try allocator.alloc(?NsObject, trailer.num_objects), // same as above
         .string_bytes = try std.ArrayList(u8).initCapacity(allocator, valid_data.len), // at most the same size as the input data
         .ref_size = trailer.ref_size,
     };
@@ -111,15 +121,16 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !Plist {
     for (0..trailer.num_objects) |i| {
         const offset = trailer.offset_table_offset + i * trailer.offset_size;
         parser.offset_table[i] = try parseUInt(parser.data[offset .. offset + trailer.offset_size]);
+        parser.object_table[i] = null;
     }
 
-    const top_object = parser.object_table.addOneAssumeCapacity();
-    top_object.* = try parseObject(&parser, trailer.top_object_id);
+    parser.object_table[trailer.top_object_id] = try parseObject(&parser, trailer.top_object_id) orelse null;
 
     return Plist{
         .allocator = allocator,
         .objects = parser.object_table,
         .string_bytes = parser.string_bytes,
+        .top = &parser.object_table[trailer.top_object_id],
     };
 }
 
@@ -204,21 +215,21 @@ fn parseObject(p: *Parser, object_id: u64) !?NsObject {
             const data = p.data[(offset + 1)..(offset + 1 + 8)];
             return NsObject{ .ns_date = try parseFloat(data) + cf_epoch };
         },
-        0x4 => { // [0100][nnnn] ?[int] ... | NSData object, nnnn number of bytes unless nnnn == 1111, then the length is the NSNumber int that follows
+        0x4 => { // [0100][nnnn] ?[int] ... | NSData object, nnnn number of bytes, unless nnnn == 1111, then the length is the NSNumber int that follows
             const data = try parseRawData(p.data[offset..], type_byte.obj_info);
             const idx = p.string_bytes.items.len;
 
             p.string_bytes.appendSliceAssumeCapacity(data);
             return NsObject{ .ns_data = p.string_bytes.items[idx..] };
         },
-        0x5, 0x7 => { // ([0101]/[0111])[nnnn] ?[int] ... | ASCII/UTF-8 string, nnnn number of bytes unless nnnn == 1111, then the length is the NSNumber int that follows
+        0x5, 0x7 => { // ([0101]/[0111])[nnnn] ?[int] ... | ASCII/UTF-8 string, nnnn number of bytes, unless nnnn == 1111, then the length is the NSNumber int that follows
             const data = try parseRawData(p.data[offset..], type_byte.obj_info);
             const idx = p.string_bytes.items.len;
 
             p.string_bytes.appendSliceAssumeCapacity(data);
             return NsObject{ .ns_string = p.string_bytes.items[idx..] };
         },
-        0x6 => { // [0110][nnnn] ?[int] ... | UTF-16Be string, nnnn number of bytes unless nnnn == 1111, then the length is the NSNumber int that follows
+        0x6 => { // [0110][nnnn] ?[int] ... | UTF-16Be string, nnnn number of bytes, unless nnnn == 1111, then the length is the NSNumber int that follows
             const data = try parseRawData(p.data[offset..], type_byte.obj_info);
             const idx = p.string_bytes.items.len;
 
@@ -240,18 +251,52 @@ fn parseObject(p: *Parser, object_id: u64) !?NsObject {
             const data = p.data[(offset + 1)..(offset + 1 + len)];
             return NsObject{ .uid = try parseUInt(data) };
         },
-        0xA => { // [1010][nnnn] ?[int] ... | NSArray, nnnn number of objects unless nnnn == 1111, then the length is the NSNumber int that follows
+        0xA, 0xB, 0xC => { // ([1010]/[1011]/[1100])[nnnn] ?[int] ... | NSArray/NSOrderedSet/NSSet, nnnn number of objects, unless nnnn == 1111, then the length is the NSNumber int that follows
             const lenOffset = try parseLenOffset(p.data[offset..], type_byte.obj_info);
-            const idx = p.object_table.items.len;
-
-            _ = p.object_table.addManyAsSliceAssumeCapacity(@as(usize, lenOffset.len));
+            const arr: []*?NsObject = try p.allocator.alloc(*?NsObject, lenOffset.len);
+            errdefer p.allocator.free(arr);
 
             for (0..lenOffset.len) |i| {
-                const obj_id = try parseUInt(p.data[(offset + lenOffset.offset + i)..]);
-                p.object_table.items[idx + i] = try parseObject(p, obj_id);
+                const obj_id = try parseRef(p.data[offset + lenOffset.offset ..], i, p.ref_size);
+                p.object_table[obj_id] = try parseObject(p, obj_id);
+                arr[i] = &p.object_table[obj_id];
             }
 
-            return NsObject{ .ns_array = p.object_table.items[idx .. idx + lenOffset.len] };
+            return NsObject{ .ns_array = arr };
+        },
+        0xD => { // [1101][nnnn] ?[int] ... | NSDictionary, nnnn number of key-value pairs, unless nnnn == 1111, then the length is the NSNumber int that follows
+            const lenOffset = try parseLenOffset(p.data[offset..], type_byte.obj_info);
+
+            var dict = std.StringHashMap(*?NsObject).init(p.allocator);
+            errdefer dict.deinit();
+
+            _ = try dict.ensureTotalCapacity(@intCast(lenOffset.len));
+
+            for (0..lenOffset.len) |i| {
+                const key_id = try parseRef(p.data[(offset + lenOffset.offset)..], 2 * i, p.ref_size);
+                const val_id = try parseRef(p.data[(offset + lenOffset.offset)..], 2 * i + 1, p.ref_size);
+
+                const key = try parseObject(p, key_id);
+                const val = try parseObject(p, val_id);
+
+                p.object_table[key_id] = key;
+                p.object_table[val_id] = val;
+
+                if (key == null) {
+                    continue;
+                }
+
+                const v = &p.object_table[val_id];
+
+                switch (key.?) {
+                    .ns_string => |k| {
+                        dict.putAssumeCapacity(k, v);
+                    },
+                    else => {},
+                }
+            }
+
+            return NsObject{ .ns_dict = dict };
         },
         else => error.PlistMalformed,
     };
@@ -301,7 +346,11 @@ fn parseRawData(data: []const u8, object_info: u8) ![]const u8 {
     return data[lenOffset.offset .. lenOffset.offset + lenOffset.len];
 }
 
-// DATA PARSING
+fn parseRef(data: []const u8, idx: usize, ref_size: u8) !u64 {
+    const start = idx * ref_size;
+    const end = start + ref_size;
+    return try parseUInt(data[start..end]);
+}
 
 fn parseUInt(data: []const u8) !u64 {
     return switch (data.len) {
