@@ -173,6 +173,10 @@ fn parseTrailer(data: []const u8) !struct { offset_size: u8, ref_size: u8, num_o
 }
 
 fn parseObject(p: *Parser, object_id: u64) !?NsObject {
+    if (object_id >= p.offset_table.len) {
+        return error.PlistMalformed;
+    }
+
     const offset = p.offset_table[object_id];
     const type_byte = parseTypeByte(p.data[offset]);
 
@@ -192,7 +196,9 @@ fn parseObject(p: *Parser, object_id: u64) !?NsObject {
         0x1 => { // [0001][0nnn] ... | NSNumber type integer of 2^nnn big-endian bytes,
             const len = parseLen(type_byte.obj_info);
 
-            std.debug.assert(p.data.len >= offset + 1 + len);
+            if (p.data.len < offset + 1 + len) {
+                return error.PlistMalformed;
+            }
 
             const data = p.data[(offset + 1)..(offset + 1 + len)];
             return NsObject{ .ns_number_i = try parseInt(data) };
@@ -200,7 +206,9 @@ fn parseObject(p: *Parser, object_id: u64) !?NsObject {
         0x2 => { // [0010][0nnn] ... | NSNumber type real of 2^nnn big-endian bytes,
             const len = parseLen(type_byte.obj_info);
 
-            std.debug.assert(p.data.len >= offset + 1 + len);
+            if (p.data.len < offset + 1 + len) {
+                return error.PlistMalformed;
+            }
 
             const data = p.data[(offset + 1)..(offset + 1 + len)];
             return NsObject{ .ns_number_r = try parseFloat(data) };
@@ -210,7 +218,9 @@ fn parseObject(p: *Parser, object_id: u64) !?NsObject {
                 return error.PlistMalformed;
             }
 
-            std.debug.assert(p.data.len >= offset + 1 + 8);
+            if (p.data.len < offset + 1 + 8) {
+                return error.PlistMalformed;
+            }
 
             const data = p.data[(offset + 1)..(offset + 1 + 8)];
             return NsObject{ .ns_date = try parseFloat(data) + cf_epoch };
@@ -246,7 +256,9 @@ fn parseObject(p: *Parser, object_id: u64) !?NsObject {
         0x8 => { // [1000][nnnn] ... | UID
             const len = parseLen(type_byte.obj_info);
 
-            std.debug.assert(p.data.len >= offset + 1 + len);
+            if (p.data.len < offset + 1 + len) {
+                return error.PlistMalformed;
+            }
 
             const data = p.data[(offset + 1)..(offset + 1 + len)];
             return NsObject{ .uid = try parseUInt(data) };
@@ -322,7 +334,9 @@ fn parseLenOffset(data: []const u8, object_info: u8) !struct { len: u64, offset:
         return .{ .len = object_info, .offset = 1 };
     }
 
-    std.debug.assert(data.len > 1);
+    if (data.len < 2) {
+        return error.PlistMalformed;
+    }
 
     // Parse NSNumber encoded integer
     const int_type_byte = parseTypeByte(data[1]);
@@ -333,7 +347,9 @@ fn parseLenOffset(data: []const u8, object_info: u8) !struct { len: u64, offset:
         return error.PlistMalformed;
     }
 
-    std.debug.assert(data.len >= 2 + int_len);
+    if (data.len < 2 + int_len) {
+        return error.PlistMalformed;
+    }
 
     return .{ .len = try parseUInt(data[2..(2 + int_len)]), .offset = 2 + int_len };
 }
@@ -341,7 +357,9 @@ fn parseLenOffset(data: []const u8, object_info: u8) !struct { len: u64, offset:
 fn parseRawData(data: []const u8, object_info: u8) ![]const u8 {
     const lenOffset = try parseLenOffset(data, object_info);
 
-    std.debug.assert(data.len >= lenOffset.offset + lenOffset.len);
+    if (data.len < lenOffset.offset + lenOffset.len) {
+        return error.PlistMalformed;
+    }
 
     return data[lenOffset.offset .. lenOffset.offset + lenOffset.len];
 }
