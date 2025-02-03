@@ -146,7 +146,7 @@ fn parseHeader(data: []const u8) ![]const u8 {
     while (offset < data.len and (data[offset] == ' ' or data[offset] == '\n' or data[offset] == '\r' or data[offset] == '\t')) : (offset += 1) {}
 
     // Check for the bplist header
-    if (data.len - offset < 8 or !std.mem.eql(u8, data[offset .. offset + 6], "bplist")) {
+    if (data.len - offset < 6 or !std.mem.eql(u8, data[offset .. offset + 6], "bplist")) {
         return error.PlistMalformed;
     }
 
