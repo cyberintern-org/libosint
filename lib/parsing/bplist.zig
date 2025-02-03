@@ -241,14 +241,19 @@ fn parseObject(p: *Parser, object_id: u64) !?NsObject {
         },
         0x6 => { // [0110][nnnn] ?[int] ... | UTF-16Be string, nnnn number of bytes, unless nnnn == 1111, then the length is the NSNumber int that follows
             const data = try parseRawData(p.data[offset..], type_byte.obj_info);
-            const idx = p.string_bytes.items.len;
+            var idx = p.string_bytes.items.len;
 
-            var data_u16: []u16 = std.mem.bytesAsSlice(u16, @as(*[]align(2) u8, @constCast(@ptrCast(@alignCast(data)))));
+            try p.string_bytes.appendSlice(data);
+
+            const aligned_ptr: []align(2) u8 = @alignCast(p.string_bytes.items[idx..]);
+
+            var data_u16: []u16 = std.mem.bytesAsSlice(u16, aligned_ptr[0..]);
 
             for (0..data_u16.len) |i| {
                 data_u16[i] = std.mem.bigToNative(u16, data_u16[i]);
             }
 
+            idx = p.string_bytes.items.len;
             try std.unicode.utf16LeToUtf8ArrayList(&p.string_bytes, data_u16);
 
             return NsObject{ .ns_string = p.string_bytes.items[idx..] };
