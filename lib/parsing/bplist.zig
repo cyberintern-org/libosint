@@ -310,11 +310,10 @@ fn parseObject(p: *Parser, object_id: u64) !?NsObject {
                         dict.putAssumeCapacity(k, v);
                     },
                     .ns_number_i => |num| {
-                        const idx = p.string_bytes.items.len;
                         const len = std.fmt.count("{}", .{num});
 
-                        p.string_bytes.appendSliceAssumeCapacity(len);
-                        const k = std.fmt.bufPrintIntToSlice(p.string_bytes.items[idx..(idx + len)], num, 10, .lower, .{});
+                        const buf = p.string_bytes.addManyAsSliceAssumeCapacity(len);
+                        const k = std.fmt.bufPrintIntToSlice(buf, num, 10, .lower, .{});
 
                         dict.putAssumeCapacity(k, v);
                     },
