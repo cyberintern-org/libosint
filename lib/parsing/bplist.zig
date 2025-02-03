@@ -510,3 +510,100 @@ test "double-precision float parsing" {
         try std.testing.expectEqual(f, try parseFloat(&buf));
     }
 }
+
+test "header BOM and whitespace ommision" {
+    const data = [_]u8{ 0xEF, 0xBB, 0xBF, ' ', ' ', ' ', '\n', 'b', 'p', 'l', 'i', 's', 't' };
+    const valid_data = try parseHeader(data[0..]);
+
+    try std.testing.expectEqualStrings(valid_data, "bplist");
+}
+
+test "trailer parsing" {
+    const data = [_]u8{
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x01,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3F,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xCB,
+    };
+
+    const trailer = try parseTrailer(data[0..]);
+
+    try std.testing.expectEqual(trailer.offset_size, 2);
+    try std.testing.expectEqual(trailer.ref_size, 1);
+    try std.testing.expectEqual(trailer.num_objects, 63);
+    try std.testing.expectEqual(trailer.top_object_id, 0);
+    try std.testing.expectEqual(trailer.offset_table_offset, 971);
+}
+
+test "type byte parsing" {
+    const type_byte = parseTypeByte(0x12);
+
+    try std.testing.expectEqual(type_byte.obj_type, 0x1);
+    try std.testing.expectEqual(type_byte.obj_info, 0x2);
+}
+
+test "length calculation" {
+    try std.testing.expectEqual(parseLen(0x0), 1);
+    try std.testing.expectEqual(parseLen(0x1), 2);
+    try std.testing.expectEqual(parseLen(0x2), 4);
+    try std.testing.expectEqual(parseLen(0x3), 8);
+}
+
+test "length offset calculation" {
+    const data = [_]u8{ 0x5F, 0x10, 0x26 };
+    const type_byte = parseTypeByte(data[0]);
+
+    const lenOffset = try parseLenOffset(data[0..], type_byte.obj_info);
+
+    try std.testing.expectEqual(lenOffset.len, 38);
+    try std.testing.expectEqual(lenOffset.offset, 3);
+}
+
+test "ASCII string parsing" {
+    const data = [_]u8{
+        0x5F, 0x10, 0x16, 0x41, 0x70, 0x70, 0x6C, 0x65, 0x50,
+        0x61, 0x73, 0x73, 0x63, 0x6F, 0x64, 0x65, 0x4B, 0x65,
+        0x79, 0x62, 0x6F, 0x61, 0x72, 0x64, 0x73,
+    };
+    var objs = [_]?NsObject{null};
+    var offset_table = [_]u64{0};
+
+    var parser = Parser{
+        .allocator = std.heap.page_allocator,
+        .data = data[0..],
+        .object_table = objs[0..],
+        .offset_table = offset_table[0..],
+        .string_bytes = try std.ArrayList(u8).initCapacity(std.heap.page_allocator, 26),
+        .ref_size = 1,
+    };
+
+    const obj = try parseObject(&parser, 0);
+
+    try std.testing.expectEqualStrings(obj.?.ns_string, "ApplePasscodeKeyboards");
+}
+
+test "UTF-16Be string parsing" {
+    const data = [_]u8{
+        0x6F, 0x10, 0x2C, 0x00, 0x41, 0x00, 0x70, 0x00,
+        0x70, 0x00, 0x6C, 0x00, 0x65, 0x00, 0x50, 0x00,
+        0x61, 0x00, 0x73, 0x00, 0x73, 0x00, 0x63, 0x00,
+        0x6F, 0x00, 0x64, 0x00, 0x65, 0x00, 0x4B, 0x00,
+        0x65, 0x00, 0x79, 0x00, 0x62, 0x00, 0x6F, 0x00,
+        0x61, 0x00, 0x72, 0x00, 0x64, 0x00, 0x73,
+    };
+    var objs = [_]?NsObject{null};
+    var offset_table = [_]u64{0};
+
+    var parser = Parser{
+        .allocator = std.heap.page_allocator,
+        .data = data[0..],
+        .object_table = objs[0..],
+        .offset_table = offset_table[0..],
+        .string_bytes = try std.ArrayList(u8).initCapacity(std.heap.page_allocator, 44),
+        .ref_size = 1,
+    };
+
+    const obj = try parseObject(&parser, 0);
+
+    try std.testing.expectEqualStrings(obj.?.ns_string, "ApplePasscodeKeyboards");
+}
