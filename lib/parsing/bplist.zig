@@ -662,3 +662,41 @@ test "dict parsing" {
 
     try std.testing.expectEqual(v.?.*.?.ns_number_i, 28);
 }
+
+test "invalid object id error" {
+    const data = [_]u8{0x00};
+    var objs = [_]?NsObject{null};
+    var offset_table = [_]u64{0};
+
+    var parser = Parser{
+        .allocator = std.heap.page_allocator,
+        .data = data[0..],
+        .object_table = objs[0..],
+        .offset_table = offset_table[0..],
+        .string_bytes = std.ArrayList(u8).init(std.heap.page_allocator),
+        .ref_size = 1,
+    };
+
+    _ = parseObject(&parser, 1) catch |err| {
+        try std.testing.expectEqual(err, error.PlistMalformed);
+    };
+}
+
+test "invalid object type error" {
+    const data = [_]u8{0xFF};
+    var objs = [_]?NsObject{null};
+    var offset_table = [_]u64{0};
+
+    var parser = Parser{
+        .allocator = std.heap.page_allocator,
+        .data = data[0..],
+        .object_table = objs[0..],
+        .offset_table = offset_table[0..],
+        .string_bytes = std.ArrayList(u8).init(std.heap.page_allocator),
+        .ref_size = 1,
+    };
+
+    _ = parseObject(&parser, 0) catch |err| {
+        try std.testing.expectEqual(err, error.PlistMalformed);
+    };
+}
