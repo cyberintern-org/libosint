@@ -75,7 +75,7 @@ const Parser = struct {
 
     pub fn deinit(self: *Parser) void {
         deinitObjectTable(self.allocator, self.object_table);
-        self.allocator.free(self.offset_table);
+        self.allocator.free(self.object_table);
         self.string_bytes.deinit();
     }
 
