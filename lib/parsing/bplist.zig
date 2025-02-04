@@ -607,3 +607,58 @@ test "UTF-16Be string parsing" {
 
     try std.testing.expectEqualStrings(obj.?.ns_string, "ApplePasscodeKeyboards");
 }
+
+test "array parsing" {
+    const data = [_]u8{
+        0xA2, 0x01, 0x02, 0x5F, 0x10, 0x1C, 0x65, 0x6E,
+        0x5F, 0x47, 0x42, 0x40, 0x73, 0x77, 0x3D, 0x51,
+        0x57, 0x45, 0x52, 0x54, 0x59, 0x3B, 0x68, 0x77,
+        0x3D, 0x41, 0x75, 0x74, 0x6F, 0x6D, 0x61, 0x74,
+        0x69, 0x63, 0x5E, 0x65, 0x6D, 0x6F, 0x6A, 0x69,
+        0x40, 0x73, 0x77, 0x3D, 0x45, 0x6D, 0x6F, 0x6A,
+        0x69,
+    };
+    var objs = [_]?NsObject{ null, null, null };
+    var offset_table = [_]u64{ 0, 3, 34 };
+
+    var parser = Parser{
+        .allocator = std.heap.page_allocator,
+        .data = data[0..],
+        .object_table = objs[0..],
+        .offset_table = offset_table[0..],
+        .string_bytes = try std.ArrayList(u8).initCapacity(std.heap.page_allocator, 49),
+        .ref_size = 1,
+    };
+
+    const obj = try parseObject(&parser, 0);
+
+    try std.testing.expectEqual(obj.?.ns_array.len, 2);
+    try std.testing.expectEqualStrings(obj.?.ns_array[0].*.?.ns_string, "en_GB@sw=QWERTY;hw=Automatic");
+    try std.testing.expectEqualStrings(obj.?.ns_array[1].*.?.ns_string, "emoji@sw=Emoji");
+}
+
+test "dict parsing" {
+    const data = [_]u8{
+        0xD1, 0x01, 0x02, 0x5F, 0x10, 0x20, 0x43, 0x61,
+        0x72, 0x43, 0x61, 0x70, 0x61, 0x62, 0x69, 0x6C,
+        0x69, 0x74, 0x69, 0x65, 0x73, 0x44, 0x65, 0x66,
+        0x61, 0x75, 0x6C, 0x74, 0x49, 0x64, 0x65, 0x6E,
+        0x74, 0x69, 0x66, 0x69, 0x65, 0x72, 0x10, 0x1C,
+    };
+    var objs = [_]?NsObject{ null, null, null };
+    var offset_table = [_]u64{ 0, 3, 38 };
+
+    var parser = Parser{
+        .allocator = std.heap.page_allocator,
+        .data = data[0..],
+        .object_table = objs[0..],
+        .offset_table = offset_table[0..],
+        .string_bytes = try std.ArrayList(u8).initCapacity(std.heap.page_allocator, 40),
+        .ref_size = 1,
+    };
+
+    const obj = try parseObject(&parser, 0);
+    const v = obj.?.ns_dict.get("CarCapabilitiesDefaultIdentifier");
+
+    try std.testing.expectEqual(v.?.*.?.ns_number_i, 28);
+}
