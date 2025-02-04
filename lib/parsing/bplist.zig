@@ -569,13 +569,14 @@ test "ASCII string parsing" {
     var offset_table = [_]u64{0};
 
     var parser = Parser{
-        .allocator = std.heap.page_allocator,
+        .allocator = std.testing.allocator,
         .data = data[0..],
         .object_table = objs[0..],
         .offset_table = offset_table[0..],
-        .string_bytes = try std.ArrayList(u8).initCapacity(std.heap.page_allocator, 26),
+        .string_bytes = try std.ArrayList(u8).initCapacity(std.testing.allocator, 26),
         .ref_size = 1,
     };
+    defer parser.string_bytes.deinit();
 
     const obj = try parseObject(&parser, 0);
 
@@ -595,13 +596,14 @@ test "UTF-16Be string parsing" {
     var offset_table = [_]u64{0};
 
     var parser = Parser{
-        .allocator = std.heap.page_allocator,
+        .allocator = std.testing.allocator,
         .data = data[0..],
         .object_table = objs[0..],
         .offset_table = offset_table[0..],
-        .string_bytes = try std.ArrayList(u8).initCapacity(std.heap.page_allocator, 44),
+        .string_bytes = try std.ArrayList(u8).initCapacity(std.testing.allocator, 100),
         .ref_size = 1,
     };
+    defer parser.string_bytes.deinit();
 
     const obj = try parseObject(&parser, 0);
 
@@ -622,19 +624,21 @@ test "array parsing" {
     var offset_table = [_]u64{ 0, 3, 34 };
 
     var parser = Parser{
-        .allocator = std.heap.page_allocator,
+        .allocator = std.testing.allocator,
         .data = data[0..],
         .object_table = objs[0..],
         .offset_table = offset_table[0..],
-        .string_bytes = try std.ArrayList(u8).initCapacity(std.heap.page_allocator, 49),
+        .string_bytes = try std.ArrayList(u8).initCapacity(std.testing.allocator, 49),
         .ref_size = 1,
     };
+    defer parser.string_bytes.deinit();
+    defer Parser.deinitObjectTable(parser.allocator, parser.object_table);
 
-    const obj = try parseObject(&parser, 0);
+    objs[0] = try parseObject(&parser, 0);
 
-    try std.testing.expectEqual(obj.?.ns_array.len, 2);
-    try std.testing.expectEqualStrings(obj.?.ns_array[0].*.?.ns_string, "en_GB@sw=QWERTY;hw=Automatic");
-    try std.testing.expectEqualStrings(obj.?.ns_array[1].*.?.ns_string, "emoji@sw=Emoji");
+    try std.testing.expectEqual(objs[0].?.ns_array.len, 2);
+    try std.testing.expectEqualStrings(objs[0].?.ns_array[0].*.?.ns_string, "en_GB@sw=QWERTY;hw=Automatic");
+    try std.testing.expectEqualStrings(objs[0].?.ns_array[1].*.?.ns_string, "emoji@sw=Emoji");
 }
 
 test "dict parsing" {
@@ -649,16 +653,18 @@ test "dict parsing" {
     var offset_table = [_]u64{ 0, 3, 38 };
 
     var parser = Parser{
-        .allocator = std.heap.page_allocator,
+        .allocator = std.testing.allocator,
         .data = data[0..],
         .object_table = objs[0..],
         .offset_table = offset_table[0..],
-        .string_bytes = try std.ArrayList(u8).initCapacity(std.heap.page_allocator, 40),
+        .string_bytes = try std.ArrayList(u8).initCapacity(std.testing.allocator, 40),
         .ref_size = 1,
     };
+    defer parser.string_bytes.deinit();
+    defer Parser.deinitObjectTable(parser.allocator, parser.object_table);
 
-    const obj = try parseObject(&parser, 0);
-    const v = obj.?.ns_dict.get("CarCapabilitiesDefaultIdentifier");
+    objs[0] = try parseObject(&parser, 0);
+    const v = objs[0].?.ns_dict.get("CarCapabilitiesDefaultIdentifier");
 
     try std.testing.expectEqual(v.?.*.?.ns_number_i, 28);
 }
@@ -669,13 +675,14 @@ test "invalid object id error" {
     var offset_table = [_]u64{0};
 
     var parser = Parser{
-        .allocator = std.heap.page_allocator,
+        .allocator = std.testing.allocator,
         .data = data[0..],
         .object_table = objs[0..],
         .offset_table = offset_table[0..],
-        .string_bytes = std.ArrayList(u8).init(std.heap.page_allocator),
+        .string_bytes = std.ArrayList(u8).init(std.testing.allocator),
         .ref_size = 1,
     };
+    defer parser.string_bytes.deinit();
 
     _ = parseObject(&parser, 1) catch |err| {
         try std.testing.expectEqual(err, error.PlistMalformed);
@@ -688,13 +695,14 @@ test "invalid object type error" {
     var offset_table = [_]u64{0};
 
     var parser = Parser{
-        .allocator = std.heap.page_allocator,
+        .allocator = std.testing.allocator,
         .data = data[0..],
         .object_table = objs[0..],
         .offset_table = offset_table[0..],
-        .string_bytes = std.ArrayList(u8).init(std.heap.page_allocator),
+        .string_bytes = std.ArrayList(u8).init(std.testing.allocator),
         .ref_size = 1,
     };
+    defer parser.string_bytes.deinit();
 
     _ = parseObject(&parser, 0) catch |err| {
         try std.testing.expectEqual(err, error.PlistMalformed);
