@@ -1,1 +1,1 @@
-pub const parsing = @import("parsing/parsing.zig");
+pub const scan = @import("scan.zig");
