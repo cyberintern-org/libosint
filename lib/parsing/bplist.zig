@@ -75,7 +75,7 @@ const Parser = struct {
 
     pub fn deinit(self: *Parser) void {
         deinitObjectTable(self.allocator, self.object_table);
-        self.allocator.free(self.offset_table);
+        self.allocator.free(self.object_table);
         self.string_bytes.deinit();
     }
 
@@ -569,13 +569,14 @@ test "ASCII string parsing" {
     var offset_table = [_]u64{0};
 
     var parser = Parser{
-        .allocator = std.heap.page_allocator,
+        .allocator = std.testing.allocator,
         .data = data[0..],
         .object_table = objs[0..],
         .offset_table = offset_table[0..],
-        .string_bytes = try std.ArrayList(u8).initCapacity(std.heap.page_allocator, 26),
+        .string_bytes = try std.ArrayList(u8).initCapacity(std.testing.allocator, 26),
         .ref_size = 1,
     };
+    defer parser.string_bytes.deinit();
 
     const obj = try parseObject(&parser, 0);
 
@@ -595,13 +596,14 @@ test "UTF-16Be string parsing" {
     var offset_table = [_]u64{0};
 
     var parser = Parser{
-        .allocator = std.heap.page_allocator,
+        .allocator = std.testing.allocator,
         .data = data[0..],
         .object_table = objs[0..],
         .offset_table = offset_table[0..],
-        .string_bytes = try std.ArrayList(u8).initCapacity(std.heap.page_allocator, 44),
+        .string_bytes = try std.ArrayList(u8).initCapacity(std.testing.allocator, 100),
         .ref_size = 1,
     };
+    defer parser.string_bytes.deinit();
 
     const obj = try parseObject(&parser, 0);
 
@@ -622,19 +624,21 @@ test "array parsing" {
     var offset_table = [_]u64{ 0, 3, 34 };
 
     var parser = Parser{
-        .allocator = std.heap.page_allocator,
+        .allocator = std.testing.allocator,
         .data = data[0..],
         .object_table = objs[0..],
         .offset_table = offset_table[0..],
-        .string_bytes = try std.ArrayList(u8).initCapacity(std.heap.page_allocator, 49),
+        .string_bytes = try std.ArrayList(u8).initCapacity(std.testing.allocator, 49),
         .ref_size = 1,
     };
+    defer parser.string_bytes.deinit();
+    defer Parser.deinitObjectTable(parser.allocator, parser.object_table);
 
-    const obj = try parseObject(&parser, 0);
+    objs[0] = try parseObject(&parser, 0);
 
-    try std.testing.expectEqual(obj.?.ns_array.len, 2);
-    try std.testing.expectEqualStrings(obj.?.ns_array[0].*.?.ns_string, "en_GB@sw=QWERTY;hw=Automatic");
-    try std.testing.expectEqualStrings(obj.?.ns_array[1].*.?.ns_string, "emoji@sw=Emoji");
+    try std.testing.expectEqual(objs[0].?.ns_array.len, 2);
+    try std.testing.expectEqualStrings(objs[0].?.ns_array[0].*.?.ns_string, "en_GB@sw=QWERTY;hw=Automatic");
+    try std.testing.expectEqualStrings(objs[0].?.ns_array[1].*.?.ns_string, "emoji@sw=Emoji");
 }
 
 test "dict parsing" {
@@ -649,16 +653,18 @@ test "dict parsing" {
     var offset_table = [_]u64{ 0, 3, 38 };
 
     var parser = Parser{
-        .allocator = std.heap.page_allocator,
+        .allocator = std.testing.allocator,
         .data = data[0..],
         .object_table = objs[0..],
         .offset_table = offset_table[0..],
-        .string_bytes = try std.ArrayList(u8).initCapacity(std.heap.page_allocator, 40),
+        .string_bytes = try std.ArrayList(u8).initCapacity(std.testing.allocator, 40),
         .ref_size = 1,
     };
+    defer parser.string_bytes.deinit();
+    defer Parser.deinitObjectTable(parser.allocator, parser.object_table);
 
-    const obj = try parseObject(&parser, 0);
-    const v = obj.?.ns_dict.get("CarCapabilitiesDefaultIdentifier");
+    objs[0] = try parseObject(&parser, 0);
+    const v = objs[0].?.ns_dict.get("CarCapabilitiesDefaultIdentifier");
 
     try std.testing.expectEqual(v.?.*.?.ns_number_i, 28);
 }
@@ -669,13 +675,14 @@ test "invalid object id error" {
     var offset_table = [_]u64{0};
 
     var parser = Parser{
-        .allocator = std.heap.page_allocator,
+        .allocator = std.testing.allocator,
         .data = data[0..],
         .object_table = objs[0..],
         .offset_table = offset_table[0..],
-        .string_bytes = std.ArrayList(u8).init(std.heap.page_allocator),
+        .string_bytes = std.ArrayList(u8).init(std.testing.allocator),
         .ref_size = 1,
     };
+    defer parser.string_bytes.deinit();
 
     _ = parseObject(&parser, 1) catch |err| {
         try std.testing.expectEqual(err, error.PlistMalformed);
@@ -688,15 +695,46 @@ test "invalid object type error" {
     var offset_table = [_]u64{0};
 
     var parser = Parser{
-        .allocator = std.heap.page_allocator,
+        .allocator = std.testing.allocator,
         .data = data[0..],
         .object_table = objs[0..],
         .offset_table = offset_table[0..],
-        .string_bytes = std.ArrayList(u8).init(std.heap.page_allocator),
+        .string_bytes = std.ArrayList(u8).init(std.testing.allocator),
         .ref_size = 1,
     };
+    defer parser.string_bytes.deinit();
 
     _ = parseObject(&parser, 0) catch |err| {
         try std.testing.expectEqual(err, error.PlistMalformed);
     };
+}
+
+test "parser deinitialization" {
+    const data = [_]u8{
+        0xD1, 0x01, 0x02, 0x5F, 0x10, 0x20, 0x43, 0x61,
+        0x72, 0x43, 0x61, 0x70, 0x61, 0x62, 0x69, 0x6C,
+        0x69, 0x74, 0x69, 0x65, 0x73, 0x44, 0x65, 0x66,
+        0x61, 0x75, 0x6C, 0x74, 0x49, 0x64, 0x65, 0x6E,
+        0x74, 0x69, 0x66, 0x69, 0x65, 0x72, 0x10, 0x1C,
+    };
+
+    var parser = Parser{
+        .allocator = std.testing.allocator,
+        .data = data[0..],
+        .object_table = try std.testing.allocator.alloc(?NsObject, 3),
+        .offset_table = try std.testing.allocator.alloc(u64, 3),
+        .string_bytes = try std.ArrayList(u8).initCapacity(std.testing.allocator, 40),
+        .ref_size = 1,
+    };
+    defer std.testing.allocator.free(parser.offset_table);
+    defer parser.deinit();
+
+    parser.object_table[0] = null;
+    parser.object_table[1] = null;
+    parser.object_table[2] = null;
+    parser.offset_table[0] = 0;
+    parser.offset_table[1] = 3;
+    parser.offset_table[2] = 38;
+
+    parser.object_table[0] = try parseObject(&parser, 0);
 }
