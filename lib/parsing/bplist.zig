@@ -708,3 +708,33 @@ test "invalid object type error" {
         try std.testing.expectEqual(err, error.PlistMalformed);
     };
 }
+
+test "parser deinitialization" {
+    const data = [_]u8{
+        0xD1, 0x01, 0x02, 0x5F, 0x10, 0x20, 0x43, 0x61,
+        0x72, 0x43, 0x61, 0x70, 0x61, 0x62, 0x69, 0x6C,
+        0x69, 0x74, 0x69, 0x65, 0x73, 0x44, 0x65, 0x66,
+        0x61, 0x75, 0x6C, 0x74, 0x49, 0x64, 0x65, 0x6E,
+        0x74, 0x69, 0x66, 0x69, 0x65, 0x72, 0x10, 0x1C,
+    };
+
+    var parser = Parser{
+        .allocator = std.testing.allocator,
+        .data = data[0..],
+        .object_table = try std.testing.allocator.alloc(?NsObject, 3),
+        .offset_table = try std.testing.allocator.alloc(u64, 3),
+        .string_bytes = try std.ArrayList(u8).initCapacity(std.testing.allocator, 40),
+        .ref_size = 1,
+    };
+    defer std.testing.allocator.free(parser.offset_table);
+    defer parser.deinit();
+
+    parser.object_table[0] = null;
+    parser.object_table[1] = null;
+    parser.object_table[2] = null;
+    parser.offset_table[0] = 0;
+    parser.offset_table[1] = 3;
+    parser.offset_table[2] = 38;
+
+    parser.object_table[0] = try parseObject(&parser, 0);
+}
