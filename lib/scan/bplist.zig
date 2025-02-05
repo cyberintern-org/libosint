@@ -511,7 +511,7 @@ test "128-bit integer parsing" {
 test "invalid size integer error" {
     const data = [_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05 };
     _ = parseInt(&data) catch |err| {
-        try std.testing.expectEqual(err, error.PlistMalformed);
+        try std.testing.expectEqual(error.PlistMalformed, err);
     };
 }
 
@@ -562,7 +562,7 @@ test "header BOM and whitespace ommision" {
     const data = [_]u8{ 0xEF, 0xBB, 0xBF, ' ', ' ', ' ', '\n', 'b', 'p', 'l', 'i', 's', 't' };
     const valid_data = try parseHeader(data[0..]);
 
-    try std.testing.expectEqualStrings(valid_data, "bplist");
+    try std.testing.expectEqualStrings("bplist", valid_data);
 }
 
 test "trailer parsing" {
@@ -575,25 +575,25 @@ test "trailer parsing" {
 
     const trailer = try parseTrailer(data[0..]);
 
-    try std.testing.expectEqual(trailer.offset_size, 2);
-    try std.testing.expectEqual(trailer.ref_size, 1);
-    try std.testing.expectEqual(trailer.num_objects, 63);
-    try std.testing.expectEqual(trailer.top_object_id, 0);
-    try std.testing.expectEqual(trailer.offset_table_offset, 971);
+    try std.testing.expectEqual(2, trailer.offset_size);
+    try std.testing.expectEqual(1, trailer.ref_size);
+    try std.testing.expectEqual(63, trailer.num_objects);
+    try std.testing.expectEqual(0, trailer.top_object_id);
+    try std.testing.expectEqual(971, trailer.offset_table_offset);
 }
 
 test "type byte parsing" {
     const type_byte = parseTypeByte(0x12);
 
-    try std.testing.expectEqual(type_byte.obj_type, 0x1);
-    try std.testing.expectEqual(type_byte.obj_info, 0x2);
+    try std.testing.expectEqual(0x1, type_byte.obj_type);
+    try std.testing.expectEqual(0x2, type_byte.obj_info);
 }
 
 test "length calculation" {
-    try std.testing.expectEqual(parseLen(0x0), 1);
-    try std.testing.expectEqual(parseLen(0x1), 2);
-    try std.testing.expectEqual(parseLen(0x2), 4);
-    try std.testing.expectEqual(parseLen(0x3), 8);
+    try std.testing.expectEqual(1, parseLen(0x0));
+    try std.testing.expectEqual(2, parseLen(0x1));
+    try std.testing.expectEqual(4, parseLen(0x2));
+    try std.testing.expectEqual(8, parseLen(0x3));
 }
 
 test "length offset calculation" {
@@ -602,8 +602,8 @@ test "length offset calculation" {
 
     const lenOffset = try parseLenOffset(data[0..], type_byte.obj_info);
 
-    try std.testing.expectEqual(lenOffset.len, 38);
-    try std.testing.expectEqual(lenOffset.offset, 3);
+    try std.testing.expectEqual(38, lenOffset.len);
+    try std.testing.expectEqual(3, lenOffset.offset);
 }
 
 test "ASCII string parsing" {
@@ -615,19 +615,27 @@ test "ASCII string parsing" {
     var objs = [_]?NsObject{null};
     var offset_table = [_]u64{0};
 
-    var parser = Parser{
-        .allocator = std.testing.allocator,
+    var scanner = Scanner{
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
         .data = data[0..],
         .object_table = objs[0..],
         .offset_table = offset_table[0..],
         .string_bytes = try std.ArrayList(u8).initCapacity(std.testing.allocator, 26),
-        .ref_size = 1,
+        .trailer = .{
+            .num_objects = 1,
+            .ref_size = 1,
+            .offset_size = 1,
+            .offset_table_offset = 0,
+            .top_object_id = 0,
+        },
     };
-    defer parser.string_bytes.deinit();
 
-    const obj = try parseObject(&parser, 0);
+    defer scanner.string_bytes.deinit();
+    defer scanner.arena.deinit();
 
-    try std.testing.expectEqualStrings(obj.?.ns_string, "ApplePasscodeKeyboards");
+    const obj = try scanner.scanAll();
+
+    try std.testing.expectEqualStrings("ApplePasscodeKeyboards", obj.?.ns_string);
 }
 
 test "UTF-16Be string parsing" {
@@ -642,19 +650,26 @@ test "UTF-16Be string parsing" {
     var objs = [_]?NsObject{null};
     var offset_table = [_]u64{0};
 
-    var parser = Parser{
-        .allocator = std.testing.allocator,
+    var scanner = Scanner{
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
         .data = data[0..],
         .object_table = objs[0..],
         .offset_table = offset_table[0..],
         .string_bytes = try std.ArrayList(u8).initCapacity(std.testing.allocator, 100),
-        .ref_size = 1,
+        .trailer = .{
+            .num_objects = 1,
+            .ref_size = 1,
+            .offset_size = 1,
+            .offset_table_offset = 0,
+            .top_object_id = 0,
+        },
     };
-    defer parser.string_bytes.deinit();
+    defer scanner.string_bytes.deinit();
+    defer scanner.arena.deinit();
 
-    const obj = try parseObject(&parser, 0);
+    const obj = try scanner.scanAll();
 
-    try std.testing.expectEqualStrings(obj.?.ns_string, "ApplePasscodeKeyboards");
+    try std.testing.expectEqualStrings("ApplePasscodeKeyboards", obj.?.ns_string);
 }
 
 test "array parsing" {
@@ -670,22 +685,28 @@ test "array parsing" {
     var objs = [_]?NsObject{ null, null, null };
     var offset_table = [_]u64{ 0, 3, 34 };
 
-    var parser = Parser{
-        .allocator = std.testing.allocator,
+    var scanner = Scanner{
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
         .data = data[0..],
         .object_table = objs[0..],
         .offset_table = offset_table[0..],
         .string_bytes = try std.ArrayList(u8).initCapacity(std.testing.allocator, 49),
-        .ref_size = 1,
+        .trailer = .{
+            .num_objects = 3,
+            .ref_size = 1,
+            .offset_size = 1,
+            .offset_table_offset = 0,
+            .top_object_id = 0,
+        },
     };
-    defer parser.string_bytes.deinit();
-    defer Parser.deinitObjectTable(parser.allocator, parser.object_table);
+    defer scanner.string_bytes.deinit();
+    defer scanner.arena.deinit();
 
-    objs[0] = try parseObject(&parser, 0);
+    const obj = try scanner.scanAll();
 
-    try std.testing.expectEqual(objs[0].?.ns_array.len, 2);
-    try std.testing.expectEqualStrings(objs[0].?.ns_array[0].*.?.ns_string, "en_GB@sw=QWERTY;hw=Automatic");
-    try std.testing.expectEqualStrings(objs[0].?.ns_array[1].*.?.ns_string, "emoji@sw=Emoji");
+    try std.testing.expectEqual(2, obj.?.ns_array.len);
+    try std.testing.expectEqualStrings("en_GB@sw=QWERTY;hw=Automatic", obj.?.ns_array[0].*.?.ns_string);
+    try std.testing.expectEqualStrings("emoji@sw=Emoji", obj.?.ns_array[1].*.?.ns_string);
 }
 
 test "dict parsing" {
@@ -699,21 +720,27 @@ test "dict parsing" {
     var objs = [_]?NsObject{ null, null, null };
     var offset_table = [_]u64{ 0, 3, 38 };
 
-    var parser = Parser{
-        .allocator = std.testing.allocator,
+    var scanner = Scanner{
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
         .data = data[0..],
         .object_table = objs[0..],
         .offset_table = offset_table[0..],
         .string_bytes = try std.ArrayList(u8).initCapacity(std.testing.allocator, 40),
-        .ref_size = 1,
+        .trailer = .{
+            .num_objects = 3,
+            .ref_size = 1,
+            .offset_size = 1,
+            .offset_table_offset = 0,
+            .top_object_id = 0,
+        },
     };
-    defer parser.string_bytes.deinit();
-    defer Parser.deinitObjectTable(parser.allocator, parser.object_table);
+    defer scanner.string_bytes.deinit();
+    defer scanner.arena.deinit();
 
-    objs[0] = try parseObject(&parser, 0);
-    const v = objs[0].?.ns_dict.get("CarCapabilitiesDefaultIdentifier");
+    const obj = try scanner.scanAll();
+    const v = obj.?.ns_dict.get("CarCapabilitiesDefaultIdentifier");
 
-    try std.testing.expectEqual(v.?.*.?.ns_number_i, 28);
+    try std.testing.expectEqual(28, v.?.*.?.ns_number_i);
 }
 
 test "invalid object id error" {
@@ -721,18 +748,25 @@ test "invalid object id error" {
     var objs = [_]?NsObject{null};
     var offset_table = [_]u64{0};
 
-    var parser = Parser{
-        .allocator = std.testing.allocator,
+    var scanner = Scanner{
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
         .data = data[0..],
         .object_table = objs[0..],
         .offset_table = offset_table[0..],
         .string_bytes = std.ArrayList(u8).init(std.testing.allocator),
-        .ref_size = 1,
+        .trailer = .{
+            .num_objects = 1,
+            .ref_size = 1,
+            .offset_size = 1,
+            .offset_table_offset = 0,
+            .top_object_id = 0,
+        },
     };
-    defer parser.string_bytes.deinit();
+    defer scanner.string_bytes.deinit();
+    defer scanner.arena.deinit();
 
-    _ = parseObject(&parser, 1) catch |err| {
-        try std.testing.expectEqual(err, error.PlistMalformed);
+    _ = scanner.scanAt(1) catch |err| {
+        try std.testing.expectEqual(error.PlistMalformed, err);
     };
 }
 
@@ -741,17 +775,24 @@ test "invalid object type error" {
     var objs = [_]?NsObject{null};
     var offset_table = [_]u64{0};
 
-    var parser = Parser{
-        .allocator = std.testing.allocator,
+    var scanner = Scanner{
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
         .data = data[0..],
         .object_table = objs[0..],
         .offset_table = offset_table[0..],
         .string_bytes = std.ArrayList(u8).init(std.testing.allocator),
-        .ref_size = 1,
+        .trailer = .{
+            .num_objects = 1,
+            .ref_size = 1,
+            .offset_size = 1,
+            .offset_table_offset = 0,
+            .top_object_id = 0,
+        },
     };
-    defer parser.string_bytes.deinit();
+    defer scanner.string_bytes.deinit();
+    defer scanner.arena.deinit();
 
-    _ = parseObject(&parser, 0) catch |err| {
+    _ = scanner.scanAll() catch |err| {
         try std.testing.expectEqual(err, error.PlistMalformed);
     };
 }
@@ -765,23 +806,28 @@ test "parser deinitialization" {
         0x74, 0x69, 0x66, 0x69, 0x65, 0x72, 0x10, 0x1C,
     };
 
-    var parser = Parser{
-        .allocator = std.testing.allocator,
+    var scanner = Scanner{
+        .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
         .data = data[0..],
         .object_table = try std.testing.allocator.alloc(?NsObject, 3),
         .offset_table = try std.testing.allocator.alloc(u64, 3),
         .string_bytes = try std.ArrayList(u8).initCapacity(std.testing.allocator, 40),
-        .ref_size = 1,
+        .trailer = .{
+            .num_objects = 3,
+            .ref_size = 1,
+            .offset_size = 1,
+            .offset_table_offset = 0,
+            .top_object_id = 0,
+        },
     };
-    defer std.testing.allocator.free(parser.offset_table);
-    defer parser.deinit();
+    defer scanner.deinit();
 
-    parser.object_table[0] = null;
-    parser.object_table[1] = null;
-    parser.object_table[2] = null;
-    parser.offset_table[0] = 0;
-    parser.offset_table[1] = 3;
-    parser.offset_table[2] = 38;
+    scanner.object_table[0] = null;
+    scanner.object_table[1] = null;
+    scanner.object_table[2] = null;
+    scanner.offset_table[0] = 0;
+    scanner.offset_table[1] = 3;
+    scanner.offset_table[2] = 38;
 
-    parser.object_table[0] = try parseObject(&parser, 0);
+    _ = try scanner.scanAll();
 }
