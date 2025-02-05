@@ -21,10 +21,10 @@ const std = @import("std");
 
 // PUB DEFINITIONS
 
-/// Struct representing a parsed binary plist
-pub const Plist = struct {
-    /// Allocator used to allocate the offset and object table arrays
-    allocator: std.mem.Allocator,
+/// Struct representing a parsed binary plist document
+pub const Document = struct {
+    /// Arena used to allocate the offset and object table arrays
+    arena: std.heap.ArenaAllocator,
 
     /// Array storing the parsed objects,
     /// each object is optional, as it can be null in the original plist
@@ -37,9 +37,9 @@ pub const Plist = struct {
     top: *?NsObject,
 
     /// Deinitialize the plist, freeing the objects and string bytes arrays
-    pub fn deinit(self: *Plist) void {
-        Parser.deinitObjectTable(self.allocator, self.objects);
-        self.allocator.free(self.objects);
+    pub fn deinit(self: *@This()) void {
+        self.arena.child_allocator.free(self.objects);
+        self.arena.deinit();
         self.string_bytes.deinit();
     }
 };
