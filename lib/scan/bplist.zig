@@ -16,7 +16,10 @@
 // Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301
 // USA
 
-//! Parsing of binary property lists as specified by Apple.
+//! Binary property lists parsing.
+//!
+//! For format specification see:
+//! [opensource-apple/CF](https://github.com/opensource-apple/CF/blob/master/CFBinaryPList.c)
 const std = @import("std");
 
 // PUB DEFINITIONS
@@ -295,9 +298,6 @@ pub const Scanner = struct {
 // PUB PARSING
 
 /// Parse a binary plist from the given slice of bytes
-///
-/// For format specification see:
-/// [opensource-apple/CF](https://github.com/opensource-apple/CF/blob/master/CFBinaryPList.c)
 pub fn parseFromSlice(allocator: std.mem.Allocator, s: []const u8) !Document {
     var scanner = Scanner.init(allocator, s);
 
