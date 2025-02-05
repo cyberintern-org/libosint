@@ -78,79 +78,245 @@ pub const Trailer = struct {
 /// UNIX timestamp of 2001-01-01 00:00:00 UTC, the Core Data epoch
 pub const cf_epoch = 978307200.0;
 
-// PARSING
+/// Low-level struct storing the intermediate state of the parsing process
+pub const Scanner = struct {
+    /// Arena used to allocate the offset and object table arrays
+    arena: std.heap.ArenaAllocator,
 
-/// Internal struct storing the intermediate state of the parsing process
-const Parser = struct {
-    allocator: std.mem.Allocator,
-
+    /// Data of the plist
     data: []const u8,
+
+    /// Offset table storing the offsets of the objects in the data
     offset_table: []u64,
+
+    /// Object table storing the parsed objects
     object_table: []?NsObject,
+
+    /// Copied data of the plist
     string_bytes: std.ArrayList(u8),
 
-    ref_size: u8,
+    /// Trailer extracted from the plist data
+    trailer: Trailer,
 
-    pub fn deinit(self: *Parser) void {
-        deinitObjectTable(self.allocator, self.object_table);
-        self.allocator.free(self.object_table);
+    /// Initialize the scanner with the given allocator and data
+    pub fn init(allocator: std.mem.Allocator, data: []const u8) !Scanner {
+        const valid_data = try parseHeader(data);
+        const trailer = try parseTrailer(valid_data);
+
+        var scanner = Scanner{
+            .arena = std.heap.ArenaAllocator.init(allocator),
+            .data = valid_data,
+            .offset_table = try allocator.alloc(u64, trailer.num_objects),
+            .object_table = try allocator.alloc(?NsObject, trailer.num_objects),
+            .string_bytes = try std.ArrayList(u8).initCapacity(allocator, valid_data.len),
+            .trailer = trailer,
+        };
+
+        errdefer scanner.deinit();
+
+        for (0..trailer.num_objects) |i| {
+            const offset = trailer.offset_table_offset + i * trailer.offset_size;
+            scanner.offset_table[i] = try parseUInt(scanner.data[offset .. offset + trailer.offset_size]);
+            scanner.object_table[i] = null;
+        }
+
+        return scanner;
+    }
+
+    pub fn deinit(self: *@This()) void {
+        self.arena.child_allocator.free(self.object_table);
+        self.arena.child_allocator.free(self.offset_table);
+        self.arena.deinit();
         self.string_bytes.deinit();
     }
 
-    pub fn deinitObjectTable(allocator: std.mem.Allocator, table: []?NsObject) void {
-        for (table) |obj| {
-            if (obj == null) {
-                continue;
-            }
+    pub fn scanAll(self: *@This()) !?NsObject {
+        self.object_table[self.trailer.top_object_id] = try self.scanAt(self.trailer.top_object_id);
+        return self.object_table[self.trailer.top_object_id];
+    }
 
-            switch (obj.?) {
-                .ns_dict => |dict| {
-                    @constCast(&dict).deinit();
-                },
-                .ns_array => |arr| {
-                    allocator.free(arr);
-                },
-                else => {},
-            }
+    pub fn scanAt(self: *@This(), object_id: u64) !?NsObject {
+        if (object_id >= self.offset_table.len) {
+            return error.PlistMalformed;
         }
+
+        const allocator = self.arena.allocator();
+        const offset = self.offset_table[object_id];
+        const type_byte = parseTypeByte(self.data[offset]);
+
+        return switch (type_byte.obj_type) {
+            0x0 => switch (type_byte.obj_info) {
+                0x0 => null, // [0000][0000] | null object
+                0x8 => NsObject{ .ns_number_b = false }, // [0000][1000] | NSNumber type bool = false
+                0x9 => NsObject{ .ns_number_b = true }, // [0000][1001] | NSNumber type bool = true
+
+                0xC => null, // TODO: URL with no base URL
+                0xD => null, // TODO: URL with base URL
+                0xE => null, // TODO: 16-bit UUID
+
+                0xF => null, // [0000][1111] | fill byte
+                else => error.PlistMalformed,
+            },
+            0x1 => { // [0001][0nnn] ... | NSNumber type integer of 2^nnn big-endian bytes,
+                const len = parseLen(type_byte.obj_info);
+
+                if (self.data.len < offset + 1 + len) {
+                    return error.PlistMalformed;
+                }
+
+                const data = self.data[(offset + 1)..(offset + 1 + len)];
+                return NsObject{ .ns_number_i = try parseInt(data) };
+            },
+            0x2 => { // [0010][0nnn] ... | NSNumber type real of 2^nnn big-endian bytes,
+                const len = parseLen(type_byte.obj_info);
+
+                if (self.data.len < offset + 1 + len) {
+                    return error.PlistMalformed;
+                }
+
+                const data = self.data[(offset + 1)..(offset + 1 + len)];
+                return NsObject{ .ns_number_r = try parseFloat(data) };
+            },
+            0x3 => { // [0011][0011] ... | NSDate object, 8 bytes of big-endian float
+                if (type_byte.obj_info != 0x3) {
+                    return error.PlistMalformed;
+                }
+
+                if (self.data.len < offset + 1 + 8) {
+                    return error.PlistMalformed;
+                }
+
+                const data = self.data[(offset + 1)..(offset + 1 + 8)];
+                return NsObject{ .ns_date = try parseFloat(data) + cf_epoch };
+            },
+            0x4 => { // [0100][nnnn] ?[int] ... | NSData object, nnnn number of bytes, unless nnnn == 1111, then the length is the NSNumber int that follows
+                const data = try parseRawData(self.data[offset..], type_byte.obj_info);
+                const idx = self.string_bytes.items.len;
+
+                self.string_bytes.appendSliceAssumeCapacity(data);
+                return NsObject{ .ns_data = self.string_bytes.items[idx..] };
+            },
+            0x5, 0x7 => { // ([0101]/[0111])[nnnn] ?[int] ... | ASCII/UTF-8 string, nnnn number of bytes, unless nnnn == 1111, then the length is the NSNumber int that follows
+                const data = try parseRawData(self.data[offset..], type_byte.obj_info);
+                const idx = self.string_bytes.items.len;
+
+                self.string_bytes.appendSliceAssumeCapacity(data);
+                return NsObject{ .ns_string = self.string_bytes.items[idx..] };
+            },
+            0x6 => { // [0110][nnnn] ?[int] ... | UTF-16Be string, nnnn number of bytes, unless nnnn == 1111, then the length is the NSNumber int that follows
+                const data = try parseRawData(self.data[offset..], type_byte.obj_info);
+                const idx = self.string_bytes.items.len;
+
+                const data_cp = try allocator.alloc(u8, data.len);
+                defer allocator.free(data_cp);
+
+                std.mem.copyForwards(u8, data_cp, data);
+                const aligned_ptr: []align(2) u8 = @alignCast(data_cp);
+                var data_u16: []u16 = std.mem.bytesAsSlice(u16, aligned_ptr[0..]);
+
+                for (0..data_u16.len) |i| {
+                    data_u16[i] = std.mem.bigToNative(u16, data_u16[i]);
+                }
+
+                try std.unicode.utf16LeToUtf8ArrayList(&self.string_bytes, data_u16);
+
+                return NsObject{ .ns_string = self.string_bytes.items[idx..] };
+            },
+            0x8 => { // [1000][nnnn] ... | UID
+                const len = parseLen(type_byte.obj_info);
+
+                if (self.data.len < offset + 1 + len) {
+                    return error.PlistMalformed;
+                }
+
+                const data = self.data[(offset + 1)..(offset + 1 + len)];
+                return NsObject{ .uid = try parseUInt(data) };
+            },
+            0xA, 0xB, 0xC => { // ([1010]/[1011]/[1100])[nnnn] ?[int] ... | NSArray/NSOrderedSet/NSSet, nnnn number of objects, unless nnnn == 1111, then the length is the NSNumber int that follows
+                const lenOffset = try parseLenOffset(self.data[offset..], type_byte.obj_info);
+                const arr: []*?NsObject = try allocator.alloc(*?NsObject, lenOffset.len);
+                errdefer allocator.free(arr);
+
+                for (0..lenOffset.len) |i| {
+                    const obj_id = try parseRef(self.data[offset + lenOffset.offset ..], i, self.trailer.ref_size);
+                    self.object_table[obj_id] = try self.scanAt(obj_id);
+                    arr[i] = &self.object_table[obj_id];
+                }
+
+                return NsObject{ .ns_array = arr };
+            },
+            0xD => { // [1101][nnnn] ?[int] ... | NSDictionary, nnnn number of key-value pairs, unless nnnn == 1111, then the length is the NSNumber int that follows
+                const lenOffset = try parseLenOffset(self.data[offset..], type_byte.obj_info);
+
+                var dict = std.StringHashMap(*?NsObject).init(allocator);
+                errdefer dict.deinit();
+
+                _ = try dict.ensureTotalCapacity(@intCast(lenOffset.len));
+
+                for (0..lenOffset.len) |i| {
+                    const key_id = try parseRef(self.data[(offset + lenOffset.offset)..], 2 * i, self.trailer.ref_size);
+                    const val_id = try parseRef(self.data[(offset + lenOffset.offset)..], 2 * i + 1, self.trailer.ref_size);
+
+                    const key = try self.scanAt(key_id);
+                    const val = try self.scanAt(val_id);
+
+                    self.object_table[key_id] = key;
+                    self.object_table[val_id] = val;
+
+                    if (key == null) {
+                        continue;
+                    }
+
+                    const v = &self.object_table[val_id];
+
+                    switch (key.?) {
+                        .ns_string => |k| {
+                            dict.putAssumeCapacity(k, v);
+                        },
+                        .ns_number_i => |num| {
+                            const len = std.fmt.count("{}", .{num});
+
+                            const buf = self.string_bytes.addManyAsSliceAssumeCapacity(len);
+                            const k = std.fmt.bufPrintIntToSlice(buf, num, 10, .lower, .{});
+
+                            dict.putAssumeCapacity(k, v);
+                        },
+                        else => {},
+                    }
+                }
+
+                return NsObject{ .ns_dict = dict };
+            },
+            else => error.PlistMalformed,
+        };
     }
 };
 
-/// Parse a binary plist from the given data
+// PUB PARSING
+
+/// Parse a binary plist from the given slice of bytes
 ///
 /// For format specification see:
 /// [opensource-apple/CF](https://github.com/opensource-apple/CF/blob/master/CFBinaryPList.c)
-pub fn parse(allocator: std.mem.Allocator, data: []const u8) !Plist {
-    const valid_data = try parseHeader(data);
-    const trailer = try parseTrailer(valid_data);
+pub fn parseFromSlice(allocator: std.mem.Allocator, s: []const u8) !Document {
+    var scanner = Scanner.init(allocator, s);
 
-    var parser = Parser{
-        .allocator = allocator,
-        .data = valid_data,
-        .offset_table = try allocator.alloc(u64, trailer.num_objects), // length controled by the number of objects defined in the trailer
-        .object_table = try allocator.alloc(?NsObject, trailer.num_objects), // same as above
-        .string_bytes = try std.ArrayList(u8).initCapacity(allocator, valid_data.len), // at most the same size as the input data
-        .ref_size = trailer.ref_size,
-    };
+    defer allocator.free(scanner.offset_table);
+    errdefer allocator.free(scanner.object_table);
+    errdefer scanner.string_bytes.deinit();
+    errdefer scanner.arena.deinit();
 
-    defer allocator.free(parser.offset_table);
-    errdefer parser.deinit();
+    _ = try scanner.scanAll(allocator);
 
-    for (0..trailer.num_objects) |i| {
-        const offset = trailer.offset_table_offset + i * trailer.offset_size;
-        parser.offset_table[i] = try parseUInt(parser.data[offset .. offset + trailer.offset_size]);
-        parser.object_table[i] = null;
-    }
-
-    parser.object_table[trailer.top_object_id] = try parseObject(&parser, trailer.top_object_id) orelse null;
-
-    return Plist{
-        .allocator = allocator,
-        .objects = parser.object_table,
-        .string_bytes = parser.string_bytes,
-        .top = &parser.object_table[trailer.top_object_id],
+    return Document{
+        .arena = scanner.arena,
+        .objects = scanner.object_table,
+        .string_bytes = scanner.string_bytes,
+        .top = &scanner.object_table[scanner.trailer.top_object_id],
     };
 }
+
+// INTERNAL PARSING
 
 fn parseHeader(data: []const u8) ![]const u8 {
     var offset: u8 = 0;
@@ -172,7 +338,7 @@ fn parseHeader(data: []const u8) ![]const u8 {
     return data[offset..];
 }
 
-fn parseTrailer(data: []const u8) !struct { offset_size: u8, ref_size: u8, num_objects: u64, top_object_id: u64, offset_table_offset: u64 } {
+fn parseTrailer(data: []const u8) !Trailer {
     if (data.len < 32) {
         return error.PlistMalformed;
     }
@@ -180,168 +346,31 @@ fn parseTrailer(data: []const u8) !struct { offset_size: u8, ref_size: u8, num_o
     // Final 32 bytes of the bplist form the trailer
     const trailer = data[(data.len - 32)..];
 
-    return .{
-        // 6 null bytes
-        .offset_size = trailer[6],
-        .ref_size = trailer[7],
-        .num_objects = try parseUInt(trailer[8..16]),
-        .top_object_id = try parseUInt(trailer[16..24]),
-        .offset_table_offset = try parseUInt(trailer[24..32]),
-    };
-}
+    // 6 null bytes
+    const offset_size = trailer[6];
+    const ref_size = trailer[7];
+    const num_objects = try parseUInt(trailer[8..16]);
+    const top_object_id = try parseUInt(trailer[16..24]);
+    const offset_table_offset = try parseUInt(trailer[24..32]);
 
-fn parseObject(p: *Parser, object_id: u64) !?NsObject {
-    if (object_id >= p.offset_table.len) {
+    if (offset_size == 0 or offset_size > 8) {
         return error.PlistMalformed;
     }
 
-    const offset = p.offset_table[object_id];
-    const type_byte = parseTypeByte(p.data[offset]);
+    if (ref_size == 0 or ref_size > 8) {
+        return error.PlistMalformed;
+    }
 
-    return switch (type_byte.obj_type) {
-        0x0 => switch (type_byte.obj_info) {
-            0x0 => null, // [0000][0000] | null object
-            0x8 => NsObject{ .ns_number_b = false }, // [0000][1000] | NSNumber type bool = false
-            0x9 => NsObject{ .ns_number_b = true }, // [0000][1001] | NSNumber type bool = true
+    if (top_object_id >= num_objects) {
+        return error.PlistMalformed;
+    }
 
-            0xC => null, // TODO: URL with no base URL
-            0xD => null, // TODO: URL with base URL
-            0xE => null, // TODO: 16-bit UUID
-
-            0xF => null, // [0000][1111] | fill byte
-            else => error.PlistMalformed,
-        },
-        0x1 => { // [0001][0nnn] ... | NSNumber type integer of 2^nnn big-endian bytes,
-            const len = parseLen(type_byte.obj_info);
-
-            if (p.data.len < offset + 1 + len) {
-                return error.PlistMalformed;
-            }
-
-            const data = p.data[(offset + 1)..(offset + 1 + len)];
-            return NsObject{ .ns_number_i = try parseInt(data) };
-        },
-        0x2 => { // [0010][0nnn] ... | NSNumber type real of 2^nnn big-endian bytes,
-            const len = parseLen(type_byte.obj_info);
-
-            if (p.data.len < offset + 1 + len) {
-                return error.PlistMalformed;
-            }
-
-            const data = p.data[(offset + 1)..(offset + 1 + len)];
-            return NsObject{ .ns_number_r = try parseFloat(data) };
-        },
-        0x3 => { // [0011][0011] ... | NSDate object, 8 bytes of big-endian float
-            if (type_byte.obj_info != 0x3) {
-                return error.PlistMalformed;
-            }
-
-            if (p.data.len < offset + 1 + 8) {
-                return error.PlistMalformed;
-            }
-
-            const data = p.data[(offset + 1)..(offset + 1 + 8)];
-            return NsObject{ .ns_date = try parseFloat(data) + cf_epoch };
-        },
-        0x4 => { // [0100][nnnn] ?[int] ... | NSData object, nnnn number of bytes, unless nnnn == 1111, then the length is the NSNumber int that follows
-            const data = try parseRawData(p.data[offset..], type_byte.obj_info);
-            const idx = p.string_bytes.items.len;
-
-            p.string_bytes.appendSliceAssumeCapacity(data);
-            return NsObject{ .ns_data = p.string_bytes.items[idx..] };
-        },
-        0x5, 0x7 => { // ([0101]/[0111])[nnnn] ?[int] ... | ASCII/UTF-8 string, nnnn number of bytes, unless nnnn == 1111, then the length is the NSNumber int that follows
-            const data = try parseRawData(p.data[offset..], type_byte.obj_info);
-            const idx = p.string_bytes.items.len;
-
-            p.string_bytes.appendSliceAssumeCapacity(data);
-            return NsObject{ .ns_string = p.string_bytes.items[idx..] };
-        },
-        0x6 => { // [0110][nnnn] ?[int] ... | UTF-16Be string, nnnn number of bytes, unless nnnn == 1111, then the length is the NSNumber int that follows
-            const data = try parseRawData(p.data[offset..], type_byte.obj_info);
-            var idx = p.string_bytes.items.len;
-
-            try p.string_bytes.appendSlice(data);
-
-            const aligned_ptr: []align(2) u8 = @alignCast(p.string_bytes.items[idx..]);
-
-            var data_u16: []u16 = std.mem.bytesAsSlice(u16, aligned_ptr[0..]);
-
-            for (0..data_u16.len) |i| {
-                data_u16[i] = std.mem.bigToNative(u16, data_u16[i]);
-            }
-
-            idx = p.string_bytes.items.len;
-            try std.unicode.utf16LeToUtf8ArrayList(&p.string_bytes, data_u16);
-
-            return NsObject{ .ns_string = p.string_bytes.items[idx..] };
-        },
-        0x8 => { // [1000][nnnn] ... | UID
-            const len = parseLen(type_byte.obj_info);
-
-            if (p.data.len < offset + 1 + len) {
-                return error.PlistMalformed;
-            }
-
-            const data = p.data[(offset + 1)..(offset + 1 + len)];
-            return NsObject{ .uid = try parseUInt(data) };
-        },
-        0xA, 0xB, 0xC => { // ([1010]/[1011]/[1100])[nnnn] ?[int] ... | NSArray/NSOrderedSet/NSSet, nnnn number of objects, unless nnnn == 1111, then the length is the NSNumber int that follows
-            const lenOffset = try parseLenOffset(p.data[offset..], type_byte.obj_info);
-            const arr: []*?NsObject = try p.allocator.alloc(*?NsObject, lenOffset.len);
-            errdefer p.allocator.free(arr);
-
-            for (0..lenOffset.len) |i| {
-                const obj_id = try parseRef(p.data[offset + lenOffset.offset ..], i, p.ref_size);
-                p.object_table[obj_id] = try parseObject(p, obj_id);
-                arr[i] = &p.object_table[obj_id];
-            }
-
-            return NsObject{ .ns_array = arr };
-        },
-        0xD => { // [1101][nnnn] ?[int] ... | NSDictionary, nnnn number of key-value pairs, unless nnnn == 1111, then the length is the NSNumber int that follows
-            const lenOffset = try parseLenOffset(p.data[offset..], type_byte.obj_info);
-
-            var dict = std.StringHashMap(*?NsObject).init(p.allocator);
-            errdefer dict.deinit();
-
-            _ = try dict.ensureTotalCapacity(@intCast(lenOffset.len));
-
-            for (0..lenOffset.len) |i| {
-                const key_id = try parseRef(p.data[(offset + lenOffset.offset)..], 2 * i, p.ref_size);
-                const val_id = try parseRef(p.data[(offset + lenOffset.offset)..], 2 * i + 1, p.ref_size);
-
-                const key = try parseObject(p, key_id);
-                const val = try parseObject(p, val_id);
-
-                p.object_table[key_id] = key;
-                p.object_table[val_id] = val;
-
-                if (key == null) {
-                    continue;
-                }
-
-                const v = &p.object_table[val_id];
-
-                switch (key.?) {
-                    .ns_string => |k| {
-                        dict.putAssumeCapacity(k, v);
-                    },
-                    .ns_number_i => |num| {
-                        const len = std.fmt.count("{}", .{num});
-
-                        const buf = p.string_bytes.addManyAsSliceAssumeCapacity(len);
-                        const k = std.fmt.bufPrintIntToSlice(buf, num, 10, .lower, .{});
-
-                        dict.putAssumeCapacity(k, v);
-                    },
-                    else => {},
-                }
-            }
-
-            return NsObject{ .ns_dict = dict };
-        },
-        else => error.PlistMalformed,
+    return .{
+        .offset_size = offset_size,
+        .ref_size = ref_size,
+        .num_objects = num_objects,
+        .top_object_id = top_object_id,
+        .offset_table_offset = offset_table_offset,
     };
 }
 
