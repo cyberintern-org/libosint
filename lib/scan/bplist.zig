@@ -57,6 +57,24 @@ pub const NsObject = union(enum) {
     ns_dict: std.StringHashMap(*?NsObject),
 };
 
+/// Plist trailer containing metadata about the plist structure
+pub const Trailer = struct {
+    /// Size of the offset table entries
+    offset_size: u8,
+
+    /// Size of the object reference entries
+    ref_size: u8,
+
+    /// Number of objects in the plist
+    num_objects: u64,
+
+    /// Index of the top object in the object table
+    top_object_id: u64,
+
+    /// Offset of the offset table in the plist data
+    offset_table_offset: u64,
+};
+
 /// UNIX timestamp of 2001-01-01 00:00:00 UTC, the Core Data epoch
 pub const cf_epoch = 978307200.0;
 
