@@ -7,8 +7,8 @@ pub fn build(b: *std.Build) void {
 
     // Lib artifact
     const lib = b.addStaticLibrary(.{
-        .name = "libosint",
-        .root_source_file = b.path("lib/libosint.zig"),
+        .name = "osint",
+        .root_source_file = b.path("lib/root.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -16,7 +16,7 @@ pub fn build(b: *std.Build) void {
 
     // Executable artifact
     const exe = b.addExecutable(.{
-        .name = "libosint",
+        .name = "libosint-example",
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
