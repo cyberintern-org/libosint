@@ -1,5 +1,5 @@
 // libosint - Library for the Cyberintern OSINT project
-// Copyright (C) 2025 Wojciech Mączka - Cyberintern
+// Copyright (C) 2025 Wojciech Mączka - Cybernetic Internationale
 //
 // This library is free software; you can redistribute it and/or
 // modify it under the terms of the GNU Lesser General Public
@@ -82,7 +82,7 @@ pub const Trailer = struct {
 pub const cf_epoch = 978307200.0;
 
 /// Low-level struct storing the intermediate state of the parsing process
-pub const Scanner = struct {
+pub const Parser = struct {
     /// Arena used to allocate the offset and object table arrays
     arena: std.heap.ArenaAllocator,
 
@@ -101,12 +101,12 @@ pub const Scanner = struct {
     /// Trailer extracted from the plist data
     trailer: Trailer,
 
-    /// Initialize the scanner with the given allocator and data
-    pub fn init(allocator: std.mem.Allocator, data: []const u8) !Scanner {
+    /// Initialize the parser with the given allocator and data
+    pub fn init(allocator: std.mem.Allocator, data: []const u8) !Parser {
         const valid_data = try parseHeader(data);
         const trailer = try parseTrailer(valid_data);
 
-        var scanner = Scanner{
+        var parser = Parser{
             .arena = std.heap.ArenaAllocator.init(allocator),
             .data = valid_data,
             .offset_table = try allocator.alloc(u64, trailer.num_objects),
@@ -115,15 +115,15 @@ pub const Scanner = struct {
             .trailer = trailer,
         };
 
-        errdefer scanner.deinit();
+        errdefer parser.deinit();
 
         for (0..trailer.num_objects) |i| {
             const offset = trailer.offset_table_offset + i * trailer.offset_size;
-            scanner.offset_table[i] = try parseUInt(scanner.data[offset .. offset + trailer.offset_size]);
-            scanner.object_table[i] = null;
+            parser.offset_table[i] = try parseUInt(parser.data[offset .. offset + trailer.offset_size]);
+            parser.object_table[i] = null;
         }
 
-        return scanner;
+        return parser;
     }
 
     pub fn deinit(self: *@This()) void {
@@ -133,12 +133,12 @@ pub const Scanner = struct {
         self.string_bytes.deinit();
     }
 
-    pub fn scanAll(self: *@This()) !?NsObject {
-        self.object_table[self.trailer.top_object_id] = try self.scanAt(self.trailer.top_object_id);
+    pub fn parseAll(self: *@This()) !?NsObject {
+        self.object_table[self.trailer.top_object_id] = try self.parseAt(self.trailer.top_object_id);
         return self.object_table[self.trailer.top_object_id];
     }
 
-    pub fn scanAt(self: *@This(), object_id: u64) !?NsObject {
+    pub fn parseAt(self: *@This(), object_id: u64) !?NsObject {
         if (object_id >= self.offset_table.len) {
             return error.PlistMalformed;
         }
@@ -242,7 +242,7 @@ pub const Scanner = struct {
 
                 for (0..lenOffset.len) |i| {
                     const obj_id = try parseRef(self.data[offset + lenOffset.offset ..], i, self.trailer.ref_size);
-                    self.object_table[obj_id] = try self.scanAt(obj_id);
+                    self.object_table[obj_id] = try self.parseAt(obj_id);
                     arr[i] = &self.object_table[obj_id];
                 }
 
@@ -260,8 +260,8 @@ pub const Scanner = struct {
                     const key_id = try parseRef(self.data[(offset + lenOffset.offset)..], 2 * i, self.trailer.ref_size);
                     const val_id = try parseRef(self.data[(offset + lenOffset.offset)..], 2 * i + 1, self.trailer.ref_size);
 
-                    const key = try self.scanAt(key_id);
-                    const val = try self.scanAt(val_id);
+                    const key = try self.parseAt(key_id);
+                    const val = try self.parseAt(val_id);
 
                     self.object_table[key_id] = key;
                     self.object_table[val_id] = val;
@@ -299,20 +299,20 @@ pub const Scanner = struct {
 
 /// Parse a binary plist from the given slice of bytes
 pub fn parseFromSlice(allocator: std.mem.Allocator, s: []const u8) !Document {
-    var scanner = Scanner.init(allocator, s);
+    var parser = Parser.init(allocator, s);
 
-    defer allocator.free(scanner.offset_table);
-    errdefer allocator.free(scanner.object_table);
-    errdefer scanner.string_bytes.deinit();
-    errdefer scanner.arena.deinit();
+    defer allocator.free(parser.offset_table);
+    errdefer allocator.free(parser.object_table);
+    errdefer parser.string_bytes.deinit();
+    errdefer parser.arena.deinit();
 
-    _ = try scanner.scanAll(allocator);
+    _ = try parser.scanAll(allocator);
 
     return Document{
-        .arena = scanner.arena,
-        .objects = scanner.object_table,
-        .string_bytes = scanner.string_bytes,
-        .top = &scanner.object_table[scanner.trailer.top_object_id],
+        .arena = parser.arena,
+        .objects = parser.object_table,
+        .string_bytes = parser.string_bytes,
+        .top = &parser.object_table[parser.trailer.top_object_id],
     };
 }
 
@@ -615,7 +615,7 @@ test "ASCII string parsing" {
     var objs = [_]?NsObject{null};
     var offset_table = [_]u64{0};
 
-    var scanner = Scanner{
+    var parser = Parser{
         .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
         .data = data[0..],
         .object_table = objs[0..],
@@ -630,10 +630,10 @@ test "ASCII string parsing" {
         },
     };
 
-    defer scanner.string_bytes.deinit();
-    defer scanner.arena.deinit();
+    defer parser.string_bytes.deinit();
+    defer parser.arena.deinit();
 
-    const obj = try scanner.scanAll();
+    const obj = try parser.parseAll();
 
     try std.testing.expectEqualStrings("ApplePasscodeKeyboards", obj.?.ns_string);
 }
@@ -650,7 +650,7 @@ test "UTF-16Be string parsing" {
     var objs = [_]?NsObject{null};
     var offset_table = [_]u64{0};
 
-    var scanner = Scanner{
+    var parser = Parser{
         .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
         .data = data[0..],
         .object_table = objs[0..],
@@ -664,10 +664,10 @@ test "UTF-16Be string parsing" {
             .top_object_id = 0,
         },
     };
-    defer scanner.string_bytes.deinit();
-    defer scanner.arena.deinit();
+    defer parser.string_bytes.deinit();
+    defer parser.arena.deinit();
 
-    const obj = try scanner.scanAll();
+    const obj = try parser.parseAll();
 
     try std.testing.expectEqualStrings("ApplePasscodeKeyboards", obj.?.ns_string);
 }
@@ -685,7 +685,7 @@ test "array parsing" {
     var objs = [_]?NsObject{ null, null, null };
     var offset_table = [_]u64{ 0, 3, 34 };
 
-    var scanner = Scanner{
+    var parser = Parser{
         .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
         .data = data[0..],
         .object_table = objs[0..],
@@ -699,10 +699,10 @@ test "array parsing" {
             .top_object_id = 0,
         },
     };
-    defer scanner.string_bytes.deinit();
-    defer scanner.arena.deinit();
+    defer parser.string_bytes.deinit();
+    defer parser.arena.deinit();
 
-    const obj = try scanner.scanAll();
+    const obj = try parser.parseAll();
 
     try std.testing.expectEqual(2, obj.?.ns_array.len);
     try std.testing.expectEqualStrings("en_GB@sw=QWERTY;hw=Automatic", obj.?.ns_array[0].*.?.ns_string);
@@ -720,7 +720,7 @@ test "dict parsing" {
     var objs = [_]?NsObject{ null, null, null };
     var offset_table = [_]u64{ 0, 3, 38 };
 
-    var scanner = Scanner{
+    var parser = Parser{
         .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
         .data = data[0..],
         .object_table = objs[0..],
@@ -734,10 +734,10 @@ test "dict parsing" {
             .top_object_id = 0,
         },
     };
-    defer scanner.string_bytes.deinit();
-    defer scanner.arena.deinit();
+    defer parser.string_bytes.deinit();
+    defer parser.arena.deinit();
 
-    const obj = try scanner.scanAll();
+    const obj = try parser.parseAll();
     const v = obj.?.ns_dict.get("CarCapabilitiesDefaultIdentifier");
 
     try std.testing.expectEqual(28, v.?.*.?.ns_number_i);
@@ -748,7 +748,7 @@ test "invalid object id error" {
     var objs = [_]?NsObject{null};
     var offset_table = [_]u64{0};
 
-    var scanner = Scanner{
+    var parser = Parser{
         .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
         .data = data[0..],
         .object_table = objs[0..],
@@ -762,10 +762,10 @@ test "invalid object id error" {
             .top_object_id = 0,
         },
     };
-    defer scanner.string_bytes.deinit();
-    defer scanner.arena.deinit();
+    defer parser.string_bytes.deinit();
+    defer parser.arena.deinit();
 
-    _ = scanner.scanAt(1) catch |err| {
+    _ = parser.parseAt(1) catch |err| {
         try std.testing.expectEqual(error.PlistMalformed, err);
     };
 }
@@ -775,7 +775,7 @@ test "invalid object type error" {
     var objs = [_]?NsObject{null};
     var offset_table = [_]u64{0};
 
-    var scanner = Scanner{
+    var parser = Parser{
         .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
         .data = data[0..],
         .object_table = objs[0..],
@@ -789,10 +789,10 @@ test "invalid object type error" {
             .top_object_id = 0,
         },
     };
-    defer scanner.string_bytes.deinit();
-    defer scanner.arena.deinit();
+    defer parser.string_bytes.deinit();
+    defer parser.arena.deinit();
 
-    _ = scanner.scanAll() catch |err| {
+    _ = parser.parseAll() catch |err| {
         try std.testing.expectEqual(err, error.PlistMalformed);
     };
 }
@@ -806,7 +806,7 @@ test "parser deinitialization" {
         0x74, 0x69, 0x66, 0x69, 0x65, 0x72, 0x10, 0x1C,
     };
 
-    var scanner = Scanner{
+    var parser = Parser{
         .arena = std.heap.ArenaAllocator.init(std.testing.allocator),
         .data = data[0..],
         .object_table = try std.testing.allocator.alloc(?NsObject, 3),
@@ -820,14 +820,14 @@ test "parser deinitialization" {
             .top_object_id = 0,
         },
     };
-    defer scanner.deinit();
+    defer parser.deinit();
 
-    scanner.object_table[0] = null;
-    scanner.object_table[1] = null;
-    scanner.object_table[2] = null;
-    scanner.offset_table[0] = 0;
-    scanner.offset_table[1] = 3;
-    scanner.offset_table[2] = 38;
+    parser.object_table[0] = null;
+    parser.object_table[1] = null;
+    parser.object_table[2] = null;
+    parser.offset_table[0] = 0;
+    parser.offset_table[1] = 3;
+    parser.offset_table[2] = 38;
 
-    _ = try scanner.scanAll();
+    _ = try parser.parseAll();
 }

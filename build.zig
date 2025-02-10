@@ -36,7 +36,7 @@ pub fn build(b: *std.Build) void {
 
     // Lib tests artifact
     const lib_unit_tests = b.addTest(.{
-        .root_source_file = b.path("lib/libosint.zig"),
+        .root_source_file = b.path("lib/root.zig"),
         .target = target,
         .optimize = optimize,
     });

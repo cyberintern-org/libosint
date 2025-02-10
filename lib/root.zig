@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const scan = @import("scan.zig");
+pub const parse = @import("parse.zig");
 
 test {
     std.testing.refAllDecls(@This());
