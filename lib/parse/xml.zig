@@ -34,6 +34,7 @@ const std = @import("std");
 
 /// Structure representing an XML document
 /// document ::= prolog element Misc*
+/// prolog ::= XMLDecl? Misc* (doctypedecl Misc*)?
 pub const Document = struct {
     /// Array storing the parsed nodes
     nodes: std.MultiArrayList(Node),
@@ -43,7 +44,15 @@ pub const Document = struct {
 };
 
 /// Tagged union representing different types of objects in a XML document
-pub const Node = union(enum) {};
+pub const Node = union(enum) {
+    xml_declaration: XmlDeclaration,
+};
+
+pub const XmlDeclaration = struct {
+    version: [2]u8,
+    encoding: []const u8,
+    standalone: bool,
+};
 
 /// Low-level struct storing the intermediate state of the parsing process
 pub const Parser = struct {};
