@@ -290,6 +290,44 @@ pub const Parser = struct {
 
 // PUB PARSING
 
-pub fn parseFromSlice(allocator: std.mem.Allocator, s: []const u8) !Document {}
+pub fn parseFromSlice(allocator: std.mem.Allocator, s: []const u8) !Document {
+    var fbs = std.io.fixedBufferStream(s);
+    var parser = Parser.init(allocator, fbs.reader().any());
+    defer parser.deinit();
 
-// INTERNAL PARSING
+    var nodes: std.MultiArrayList(Node) = .{};
+    var string_bytes = try std.ArrayList(u8).initCapacity(allocator, s.len);
+
+    var node = try parser.parseNext();
+
+    switch (node) {
+        Node.xml_declaration => {
+            const idx = string_bytes.items.len;
+            try string_bytes.appendSlice(node.xml_declaration.encoding);
+            allocator.free(node.xml_declaration.encoding);
+            node.xml_declaration.encoding = string_bytes.items[idx..];
+        },
+    }
+
+    try nodes.append(allocator, node);
+
+    return Document{
+        .nodes = nodes,
+        .string_bytes = string_bytes,
+    };
+}
+
+test "xml decl" {
+    const ally = std.testing.allocator;
+
+    var doc = try parseFromSlice(ally, "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>");
+    defer doc.string_bytes.deinit();
+    defer doc.nodes.deinit(ally);
+
+    const decl = doc.nodes.items(.data)[0].xml_declaration;
+
+    try std.testing.expectEqual(1, decl.version[0]);
+    try std.testing.expectEqual(0, decl.version[1]);
+    try std.testing.expectEqualStrings("UTF-8", decl.encoding);
+    try std.testing.expectEqual(true, decl.standalone);
+}
