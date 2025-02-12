@@ -36,11 +36,15 @@ const std = @import("std");
 /// document ::= prolog element Misc*
 /// prolog ::= XMLDecl? Misc* (doctypedecl Misc*)?
 pub const Document = struct {
+    arena: std.heap.ArenaAllocator,
+
     /// Array storing the parsed nodes
     nodes: std.MultiArrayList(Node),
 
-    /// Copied data of the XML document
-    string_bytes: std.ArrayList(u8),
+    pub fn deinit(self: *@This()) void {
+        self.nodes.deinit(self.arena.child_allocator);
+        self.arena.deinit();
+    }
 };
 
 /// Tagged union representing different types of objects in a XML document
@@ -56,7 +60,6 @@ pub const XmlDeclaration = struct {
 
 /// Low-level struct storing the intermediate state of the parsing process
 pub const Parser = struct {
-    allocator: std.mem.Allocator,
     reader: std.io.AnyReader,
     temp: std.ArrayList(u8),
     cursor: usize,
@@ -65,7 +68,6 @@ pub const Parser = struct {
 
     pub fn init(allocator: std.mem.Allocator, reader: std.io.AnyReader) Parser {
         return Parser{
-            .allocator = allocator,
             .reader = reader,
             .temp = std.ArrayList(u8).init(allocator),
             .cursor = 0,
@@ -78,11 +80,11 @@ pub const Parser = struct {
         self.temp.deinit();
     }
 
-    pub fn parseNext(self: *@This()) !Node {
+    pub fn parseNext(self: *@This(), allocator: std.mem.Allocator) !Node {
         while (true) {
             switch (self.state) {
                 State.prolog_xml_declaration => {
-                    const decl = try self.parseXmlDeclaration();
+                    const decl = try self.parseXmlDeclaration(allocator);
                     if (decl != null) {
                         return Node{ .xml_declaration = decl.? };
                     }
@@ -92,19 +94,19 @@ pub const Parser = struct {
         }
     }
 
-    /// XMLDecl := '<?xml' VersionInfo EncodingDecl? SDDecl? S? '?>'
-    /// VersionInfo := S 'version' Eq ("'" VersionNum "'" | '"' VersionNum '"')
-    /// VersionNum := '1.' [0-9]+
-    /// EncodingDecl := S 'encoding' Eq ('"' EncName '"' | "'" EncName "'")
-    /// EncName := [A-Za-z] ([A-Za-z0-9._] | '-')*
-    /// SDDecl := S 'standalone' Eq ('"' ('yes' | 'no') '"' | "'" ('yes' | 'no') "'")
-    fn parseXmlDeclaration(self: *@This()) !?XmlDeclaration {
+    /// XMLDecl ::= '<?xml' VersionInfo EncodingDecl? SDDecl? S? '?>'
+    /// VersionInfo ::= S 'version' Eq ("'" VersionNum "'" | '"' VersionNum '"')
+    /// VersionNum ::= '1.' [0-9]+
+    /// EncodingDecl ::= S 'encoding' Eq ('"' EncName '"' | "'" EncName "'")
+    /// EncName ::= [A-Za-z] ([A-Za-z0-9._] | '-')*
+    /// SDDecl ::= S 'standalone' Eq ('"' ('yes' | 'no') '"' | "'" ('yes' | 'no') "'")
+    fn parseXmlDeclaration(self: *@This(), allocator: std.mem.Allocator) !?XmlDeclaration {
         if (!try self.eat("<?xml")) {
             return null;
         }
 
         var version = [_]u8{ 1, 0 };
-        var encoding = std.ArrayList(u8).init(self.allocator);
+        var encoding = std.ArrayList(u8).init(allocator);
         var standalone = false;
 
         // VersionInfo
@@ -296,24 +298,14 @@ pub fn parseFromSlice(allocator: std.mem.Allocator, s: []const u8) !Document {
     defer parser.deinit();
 
     var nodes: std.MultiArrayList(Node) = .{};
-    var string_bytes = try std.ArrayList(u8).initCapacity(allocator, s.len);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    const in_ally = arena.allocator();
 
-    var node = try parser.parseNext();
-
-    switch (node) {
-        Node.xml_declaration => {
-            const idx = string_bytes.items.len;
-            try string_bytes.appendSlice(node.xml_declaration.encoding);
-            allocator.free(node.xml_declaration.encoding);
-            node.xml_declaration.encoding = string_bytes.items[idx..];
-        },
-    }
-
-    try nodes.append(allocator, node);
+    try nodes.append(allocator, try parser.parseNext(in_ally));
 
     return Document{
+        .arena = arena,
         .nodes = nodes,
-        .string_bytes = string_bytes,
     };
 }
 
@@ -321,8 +313,7 @@ test "xml decl" {
     const ally = std.testing.allocator;
 
     var doc = try parseFromSlice(ally, "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>");
-    defer doc.string_bytes.deinit();
-    defer doc.nodes.deinit(ally);
+    defer doc.deinit();
 
     const decl = doc.nodes.items(.data)[0].xml_declaration;
 
