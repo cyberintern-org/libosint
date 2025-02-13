@@ -127,10 +127,11 @@ pub const Parser = struct {
 
         var version = [_]u8{ 1, 0 };
         var encoding = std.ArrayList(u8).init(allocator);
+        errdefer encoding.deinit();
         var standalone = false;
 
         // VersionInfo
-        try self.skipWhitespace(false);
+        if (!try self.skipWhitespace()) return error.XmlMalformed;
         if (try self.eat("version")) {
             try self.skipEq();
             const q = try self.skipQuotesStart();
@@ -159,7 +160,7 @@ pub const Parser = struct {
         }
 
         // EncodingDecl?
-        try self.skipWhitespace(true);
+        _ = try self.skipWhitespace();
         if (try self.eat("encoding")) {
             try self.skipEq();
             const q = try self.skipQuotesStart();
@@ -182,7 +183,7 @@ pub const Parser = struct {
         }
 
         // SDDecl?
-        try self.skipWhitespace(true);
+        _ = try self.skipWhitespace();
         if (try self.eat("standalone")) {
             try self.skipEq();
             const q = try self.skipQuotesStart();
@@ -196,7 +197,7 @@ pub const Parser = struct {
             try self.skipQuotesEnd(q);
         }
 
-        try self.skipWhitespace(true);
+        _ = try self.skipWhitespace();
         if (!try self.eat("?>")) return error.XmlMalformed;
 
         return XmlDeclaration{
@@ -348,13 +349,13 @@ pub const Parser = struct {
 
     /// Eq ::= S? '=' S?
     fn skipEq(self: *@This()) !void {
-        try self.skipWhitespace(true);
+        _ = try self.skipWhitespace();
         if (!try self.eat("=")) return error.XmlMalformed;
-        try self.skipWhitespace(true);
+        _ = try self.skipWhitespace();
     }
 
-    /// S :== (#x20 | #x9 | #xD | #xA)+
-    fn skipWhitespace(self: *@This(), optional: bool) !void {
+    /// S ::= (#x20 | #x9 | #xD | #xA)+
+    fn skipWhitespace(self: *@This()) !bool {
         var i: usize = 0;
         while (try self.peek(1)) : (i += 1) {
             switch (self.top()) {
@@ -363,10 +364,7 @@ pub const Parser = struct {
                     continue;
                 },
                 else => {
-                    if (!optional and i == 0) {
-                        return error.XmlMalformed;
-                    }
-                    return;
+                    return i > 0;
                 },
             }
         }
