@@ -50,6 +50,8 @@ pub const Document = struct {
 /// Tagged union representing different types of objects in a XML document
 pub const Node = union(enum) {
     xml_declaration: XmlDeclaration,
+    comment: []const u8,
+    pi: ProcessingInstruction,
 };
 
 pub const XmlDeclaration = struct {
@@ -58,21 +60,24 @@ pub const XmlDeclaration = struct {
     standalone: bool,
 };
 
+pub const ProcessingInstruction = struct {
+    target: []const u8,
+    data: []const u8,
+};
+
 /// Low-level struct storing the intermediate state of the parsing process
 pub const Parser = struct {
     reader: std.io.AnyReader,
     temp: std.ArrayList(u8),
-    cursor: usize,
-    end: bool,
-    state: State,
+    cursor: usize = 0,
+    end: bool = false,
+    prev_state: State = State.xml_declaration,
+    state: State = State.xml_declaration,
 
     pub fn init(allocator: std.mem.Allocator, reader: std.io.AnyReader) Parser {
         return Parser{
             .reader = reader,
             .temp = std.ArrayList(u8).init(allocator),
-            .cursor = 0,
-            .end = false,
-            .state = State.prolog_xml_declaration,
         };
     }
 
@@ -80,18 +85,33 @@ pub const Parser = struct {
         self.temp.deinit();
     }
 
-    pub fn parseNext(self: *@This(), allocator: std.mem.Allocator) !Node {
-        while (true) {
+    pub fn parseNext(self: *@This(), allocator: std.mem.Allocator) !?Node {
+        state_loop: while (true) {
             switch (self.state) {
-                State.prolog_xml_declaration => {
+                State.xml_declaration => {
                     const decl = try self.parseXmlDeclaration(allocator);
                     if (decl != null) {
                         return Node{ .xml_declaration = decl.? };
                     }
-                    return error.XmlMalformed;
+                    self.prev_state = State.xml_declaration;
+                    self.state = State.misc;
+                    continue :state_loop;
+                },
+                State.misc => {
+                    const misc = try self.parseMisc(allocator);
+                    if (misc == null) {
+                        break;
+                    }
+                    switch (misc.?) {
+                        .comment => return Node{ .comment = misc.?.comment },
+                        .pi => return Node{ .pi = misc.?.pi },
+                        .s => continue :state_loop,
+                    }
                 },
             }
         }
+
+        return null;
     }
 
     /// XMLDecl ::= '<?xml' VersionInfo EncodingDecl? SDDecl? S? '?>'
@@ -186,7 +206,147 @@ pub const Parser = struct {
         };
     }
 
-    /// Eq := S? '=' S?
+    /// Misc ::= Comment | PI | S
+    fn parseMisc(self: *@This(), allocator: std.mem.Allocator) !?union(enum) { comment: []const u8, pi: ProcessingInstruction, s: void } {
+        if (try self.parseComment(allocator)) |c| {
+            return .{ .comment = c };
+        }
+        if (try self.parsePi(allocator)) |pi| {
+            return .{ .pi = pi };
+        }
+        if (try self.skipWhitespace()) {
+            return .{ .s = {} };
+        }
+
+        return null;
+    }
+
+    /// Comment ::= '<!--' ((Char - '-') | ('-' (Char - '-')))* '-->'
+    fn parseComment(self: *@This(), allocator: std.mem.Allocator) !?[]const u8 {
+        if (!try self.eat("<!--")) {
+            return null;
+        }
+
+        var comment = std.ArrayList(u8).init(allocator);
+        errdefer comment.deinit();
+
+        while (true) {
+            if (!try self.peek(3)) {
+                return error.XmlMalformed;
+            }
+            if (try self.eat("-->")) {
+                break;
+            }
+            try comment.append(self.pop());
+        }
+
+        return try comment.toOwnedSlice();
+    }
+
+    /// PI ::= '<?' PITarget (S (Char* - (Char* '?>' Char*)))? '?>'
+    /// PITarget ::= Name - (('X' | 'x') ('M' | 'm') ('L' | 'l'))
+    fn parsePi(self: *@This(), allocator: std.mem.Allocator) !?ProcessingInstruction {
+        if (!try self.eat("<?")) {
+            return null;
+        }
+
+        if (try self.eat("xml ") or try self.eat("XML ")) {
+            return error.XmlMalformed;
+        }
+
+        const target = try self.parseName(allocator) orelse return error.XmlMalformed;
+        var data = std.ArrayList(u8).init(allocator);
+        errdefer data.deinit();
+
+        while (try self.peek(1)) {
+            if (try self.eat("?>")) {
+                break;
+            }
+
+            try data.append(self.pop());
+        }
+
+        return .{
+            .target = target,
+            .data = try data.toOwnedSlice(),
+        };
+    }
+
+    /// Name ::= NameStartChar (NameChar)*
+    fn parseName(self: *@This(), allocator: std.mem.Allocator) !?[]const u8 {
+        var name = std.ArrayList(u8).init(allocator);
+        errdefer name.deinit();
+
+        try name.appendSlice(try self.parseNameStartChar() orelse return null);
+        while (try self.parseNameChar()) |c| {
+            try name.appendSlice(c);
+        }
+
+        return try name.toOwnedSlice();
+    }
+
+    /// NameStartChar ::= ":" | [A-Z] | "_" | [a-z] | [#xC0-#xD6] | [#xD8-#xF6] | [#xF8-#x2FF] | [#x370-#x37D] | [#x37F-#x1FFF] | [#x200C-#x200D] | [#x2070-#x218F] | [#x2C00-#x2FEF] | [#x3001-#xD7FF] | [#xF900-#xFDCF] | [#xFDF0-#xFFFD] | [#x10000-#xEFFFF]
+    fn parseNameStartChar(self: *@This()) !?[]const u8 {
+        if (!try self.peek(1)) {
+            return null;
+        }
+        switch (self.top()) {
+            ':', 'A'...'Z', '_', 'a'...'z', 0xC0...0xD6, 0xD8...0xF6, 0xF8...0xFF => {
+                return self.popM(1);
+            },
+            else => {},
+        }
+
+        if (!try self.peek(2)) {
+            return null;
+        }
+        switch (self.topM(2) orelse 0) {
+            0x100...0x2FF, 0x370...0x37D, 0x37F...0x1FFF, 0x200C...0x200D, 0x2070...0x218F, 0x2C00...0x2FEF, 0x3001...0xD7FF, 0xF900...0xFDCF, 0xFDF0...0xFFFD => {
+                return self.popM(2);
+            },
+            else => {},
+        }
+
+        if (!try self.peek(3)) {
+            return null;
+        }
+        switch (self.topM(3) orelse 0) {
+            0x10000...0xEFFFF => {
+                return self.popM(3);
+            },
+            else => {},
+        }
+
+        return null;
+    }
+
+    /// NameChar ::= NameStartChar | "-" | "." | [0-9] | #xB7 | [#x0300-#x036F] | [#x203F-#x2040]
+    fn parseNameChar(self: *@This()) !?[]const u8 {
+        if (!try self.peek(1)) {
+            return null;
+        }
+        switch (self.top()) {
+            '-', '.', 0...9, 0xB7 => {
+                return self.popM(1);
+            },
+            else => {},
+        }
+
+        if (try self.parseNameStartChar()) |c| {
+            return c;
+        }
+
+        switch (self.topM(2) orelse 0) {
+            0x300...0x36F, 0x203F...0x2040 => {
+                return self.popM(2);
+            },
+            else => {},
+        }
+
+        return null;
+    }
+
+    /// Eq ::= S? '=' S?
     fn skipEq(self: *@This()) !void {
         try self.skipWhitespace(true);
         if (!try self.eat("=")) return error.XmlMalformed;
@@ -237,13 +397,25 @@ pub const Parser = struct {
     }
 
     fn top(self: *@This()) u8 {
+        std.debug.assert(self.cursor < self.temp.items.len);
         return self.temp.items[self.cursor];
     }
 
     fn pop(self: *@This()) u8 {
-        const c = self.temp.items[self.cursor];
+        const c = self.top();
         self.cursor += 1;
         return c;
+    }
+
+    fn topM(self: *@This(), comptime size: usize) ?u21 {
+        std.debug.assert(self.cursor + size <= self.temp.items.len);
+        return std.unicode.utf8Decode(self.slice()[0..size]) catch return null;
+    }
+
+    fn popM(self: *@This(), comptime size: usize) []const u8 {
+        const s = self.slice()[0..size];
+        self.cursor += size;
+        return s;
     }
 
     fn slice(self: *@This()) []const u8 {
@@ -286,7 +458,8 @@ pub const Parser = struct {
     }
 
     const State = enum {
-        prolog_xml_declaration,
+        misc,
+        xml_declaration,
     };
 };
 
@@ -301,7 +474,7 @@ pub fn parseFromSlice(allocator: std.mem.Allocator, s: []const u8) !Document {
     var arena = std.heap.ArenaAllocator.init(allocator);
     const in_ally = arena.allocator();
 
-    try nodes.append(allocator, try parser.parseNext(in_ally));
+    try nodes.append(allocator, (try parser.parseNext(in_ally)).?);
 
     return Document{
         .arena = arena,
@@ -309,10 +482,17 @@ pub fn parseFromSlice(allocator: std.mem.Allocator, s: []const u8) !Document {
     };
 }
 
-test "xml decl" {
+// TEST SUITE
+
+test "high-level parsing" {
     const ally = std.testing.allocator;
 
-    var doc = try parseFromSlice(ally, "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>");
+    var doc = try parseFromSlice(ally,
+        \\<?xml version='1.0' encoding='UTF-8' standalone='yes'?>
+        \\ <!-- comment -->
+        \\ <?pi data?>
+        \\
+    );
     defer doc.deinit();
 
     const decl = doc.nodes.items(.data)[0].xml_declaration;
